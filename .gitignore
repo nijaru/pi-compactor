@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Dev artifacts
+PLAN.md
+RESEARCH.md
+handoff.md
+review.md
+
+# OS
+.DS_Store
+
+# Editors
+.vscode/
+
+# TypeScript
+*.tsbuildinfo
+dist/

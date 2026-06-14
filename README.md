@@ -16,12 +16,7 @@ cp -r . ~/.pi/agent/extensions/pi-compactor
 
 ## Context awareness
 
-The extension injects context usage hints into the LLM's view when thresholds are crossed:
-
-- **50% of context window** — primary trigger for all window sizes
-- **100k–200k tokens** — catches large windows (1m) before they hit 50%
-
-Whichever threshold is hit first wins. Hints are throttled to avoid nagging — scaled to 5 percentage points / 2.5% of window between injections. An urgency note is added at 80%+.
+Injects context usage hints (e.g. `[Context: 127k/200k (63%)]`) into the LLM's view when usage crosses thresholds. For a 200k window, first hint at 50%; for a 1m window, first hint at 200k tokens. Hints repeat as usage grows, with an urgency note added at 80%+.
 
 ## Compaction model
 

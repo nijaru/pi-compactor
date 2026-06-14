@@ -18,10 +18,10 @@ cp -r . ~/.pi/agent/extensions/pi-compactor
 
 The extension injects context usage hints into the LLM's view when thresholds are crossed:
 
-- **50% of context window** — catches small-medium windows (128k–200k)
-- **25% of window, floor 100k, cap 200k** — catches large windows (1m) early
+- **50% of context window** — primary trigger for all window sizes
+- **100k–200k tokens** — catches large windows (1m) before they hit 50%
 
-Hints are throttled to avoid nagging — scaled to 5 percentage points / 2.5% of window between injections. An urgency note is added at 80%+.
+Whichever threshold is hit first wins. Hints are throttled to avoid nagging — scaled to 5 percentage points / 2.5% of window between injections. An urgency note is added at 80%+.
 
 ## Compaction model
 

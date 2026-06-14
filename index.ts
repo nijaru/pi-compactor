@@ -184,8 +184,17 @@ export default function (pi: ExtensionAPI) {
 		throttle.lastInjectedTokens = 0;
 	};
 
+	// Track when the model triggers compaction via the tool
+	let pendingCompactionContinue = false;
+
 	// Reset throttle when context changes (compaction, session switch, tree navigation)
-	pi.on("session_compact", resetThrottle);
+	pi.on("session_compact", () => {
+		resetThrottle();
+		if (pendingCompactionContinue) {
+			pendingCompactionContinue = false;
+			pi.sendUserMessage("Compaction complete. Review the summary and continue where you left off.", { deliverAs: "followUp" });
+		}
+	});
 	pi.on("session_start", resetThrottle);
 	pi.on("session_tree", resetThrottle);
 
@@ -213,12 +222,11 @@ export default function (pi: ExtensionAPI) {
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			pendingCompactionContinue = true;
 			ctx.compact({
 				customInstructions: params.instructions,
-				onComplete: () => {
-					pi.sendUserMessage("Compaction complete. Review the summary and continue where you left off.", { deliverAs: "followUp" });
-				},
 				onError: (error) => {
+					pendingCompactionContinue = false;
 					console.error("[pi-compactor] compaction failed:", error.message);
 				},
 			});

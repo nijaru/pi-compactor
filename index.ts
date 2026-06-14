@@ -190,9 +190,10 @@ export default function (pi: ExtensionAPI) {
 	// Reset throttle when context changes (compaction, session switch, tree navigation)
 	pi.on("session_compact", () => {
 		resetThrottle();
+		console.error("[pi-compactor] session_compact fired, pending:", pendingCompactionContinue);
 		if (pendingCompactionContinue) {
 			pendingCompactionContinue = false;
-			pi.sendUserMessage("Compaction complete. Review the summary and continue where you left off.", { deliverAs: "followUp" });
+			pi.sendUserMessage("Compaction complete. Review the summary and continue where you left off.");
 		}
 	});
 	pi.on("session_start", resetThrottle);
@@ -223,6 +224,7 @@ export default function (pi: ExtensionAPI) {
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			pendingCompactionContinue = true;
+			console.error("[pi-compactor] compact tool called, setting pendingCompactionContinue");
 			ctx.compact({
 				customInstructions: params.instructions,
 				onError: (error) => {

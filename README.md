@@ -1,6 +1,6 @@
 # pi-compactor
 
-A pi extension that gives the LLM a `compact` tool and context usage awareness for self-managed compaction. The model decides when to compact based on task boundaries, accumulated tool results, and session length. No auto-triggers — just the LLM's judgment informed by context usage hints.
+Pi extension that lets the LLM manage its own context compaction. The model decides when to compact based on task state — no auto-triggers. Context hints keep it aware of usage.
 
 ## Installation
 
@@ -16,7 +16,7 @@ cp -r . ~/.pi/agent/extensions/pi-compactor
 
 ## Context awareness
 
-Injects context usage hints (e.g. `[Context: 127k/200k (63%)]`) into the LLM's view when usage crosses thresholds. For a 200k window, first hint at 50%; for a 1m window, first hint at 200k tokens. Hints repeat as usage grows, with an urgency note added at 80%+.
+Injects usage hints into the LLM's view — e.g. `[Context: 127k/200k (63%)]`. First hint at 50% of context window (or 200k tokens for 1m+ windows), then repeats as usage grows. Adds an urgency note at 80%+.
 
 ## Compaction model
 
@@ -38,7 +38,7 @@ The flag overrides the config file. If neither is set, pi uses its default compa
 
 ## Usage
 
-The extension registers a `compact` tool with prompt guidelines that tell the LLM when and how to use it. Triggers pi's built-in compaction, then sends a continuation message when complete. Errors (session too small, already compacted) are logged, not surfaced to the LLM.
+Registers a `compact` tool. After compaction, sends a continuation message so the model keeps working. Errors (session too small, already compacted) are logged, not surfaced to the LLM.
 
 Provide optional instructions to focus the summary:
 

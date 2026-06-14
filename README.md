@@ -14,10 +14,6 @@ Or copy to `~/.pi/agent/extensions/` (global) or `.pi/extensions/` (project-loca
 cp -r . ~/.pi/agent/extensions/pi-compactor
 ```
 
-## Context awareness
-
-Shows the LLM its context usage as it works, so it knows when to compact.
-
 ## Compaction model
 
 Use a cheaper/faster model for compaction summaries via `--compaction-model`:

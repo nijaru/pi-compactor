@@ -115,7 +115,7 @@ export default function (pi: ExtensionAPI) {
 
 		event.messages.push({
 			role: "user",
-			content: `[Context: ${formatTokens(tokens)}/${formatTokens(window)} (${percent}%)]${urgency} Consider compacting if at a natural stopping point.`,
+			content: `[Context: ${formatTokens(tokens)}/${formatTokens(window)} (${percent}%)]${urgency} Consider using the compact tool.`,
 			timestamp: Date.now(),
 		} as any);
 	});
@@ -156,21 +156,21 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "compact",
 		label: "Compact",
-		description: "Trigger context compaction to summarize older messages and free up context space.",
-		promptSnippet: "Compact context at task boundaries to free up space",
+		description: "Compact context by summarizing older messages to free space. Use proactively at task boundaries or when context is getting large; no user permission is needed.",
+		promptSnippet: "Proactively compact at task boundaries or before context gets full",
 		promptGuidelines: [
-			"Use compact at natural task boundaries: after completing a feature, after research/exploration, before switching focus areas",
-			"Use compact when tool results from file reads and commands are accumulating",
-			"Provide instructions to preserve what matters: e.g., instructions='preserve API design decisions'",
-			"After compacting, re-read files you were actively editing",
-			"Do NOT compact mid-task",
-			"Do NOT retry if compaction fails (session too small or already compacted)",
+			"Compact proactively after completing a task, feature, bug fix, research pass, or before switching focus",
+			"Compact when context is getting large; do not wait until it is full",
+			"No user permission is needed; this is your context management tool",
+			"Include instructions for what to preserve: current task, changed files, decisions, blockers, and next command",
+			"Avoid compacting mid-task unless context is near the limit; preserve active state first",
+			"After compacting, re-read active files before continuing",
 		],
 		parameters: Type.Object({
 			instructions: Type.Optional(
 				Type.String({
 					description:
-						"Focus instructions for the compaction summary (e.g., 'preserve API changes and error handling decisions')",
+						"What to preserve in the summary (e.g., 'current task, changed files, decisions, blockers, next command')",
 				}),
 			),
 		}),

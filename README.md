@@ -16,7 +16,7 @@ cp -r . ~/.pi/agent/extensions/pi-compactor
 
 ## Context awareness
 
-Injects usage hints like `[Context: 127k/200k (63%)]` into the LLM's view as context fills up. Adds an urgency note near capacity.
+Shows the LLM its context usage as it works, so it knows when to compact.
 
 ## Compaction model
 

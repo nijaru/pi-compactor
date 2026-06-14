@@ -216,8 +216,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.compact({
 				customInstructions: params.instructions,
 				onComplete: () => {
-					console.error("[pi-compactor] onComplete fired, sending continuation");
-					pi.sendUserMessage("Compaction complete. Review the summary and continue where you left off.");
+					setTimeout(() => pi.sendUserMessage("Continue."), 0);
 				},
 				onError: (error) => {
 					console.error("[pi-compactor] compaction failed:", error.message);

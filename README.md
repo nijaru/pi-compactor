@@ -43,7 +43,7 @@ The flag overrides the config file. If neither is set, pi uses its default compa
 
 ## Usage
 
-The extension registers a `compact` tool with prompt guidelines that tell the LLM when and how to use it. It queues pi's built-in compaction to run after the current turn. Errors (session too small, already compacted) are logged, not surfaced to the LLM.
+The extension registers a `compact` tool with prompt guidelines that tell the LLM when and how to use it. Triggers pi's built-in compaction, then sends a continuation message when complete. Errors (session too small, already compacted) are logged, not surfaced to the LLM.
 
 Provide optional instructions to focus the summary:
 

@@ -9,11 +9,11 @@ const GLOBAL_CONFIG = join(homedir(), ".pi", "agent", "compaction-policy.json");
 const PROJECT_CONFIG = ".pi/compaction-policy.json";
 
 // ── Context hint thresholds ─────────────────────────────────────────────
-const DEFAULT_PERCENT_THRESHOLD = 50;
-// 128k → 100k (floor), 200k → 100k, 1m → 200k (cap)
-const TOKEN_THRESHOLD_FLOOR = 100_000;
-const TOKEN_THRESHOLD_CAP = 200_000;
-const TOKEN_THRESHOLD_RATIO = 0.25;
+// ≤128k: 50% (hardware-constrained windows, model handles full context fine)
+// >128k: 128k tokens (quality degradation zone, proactive before 200k price cliff)
+function hintPercent(window: number): number {
+	return Math.min(50, Math.round(128_000 / window * 100));
+}
 
 function formatTokens(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
@@ -22,11 +22,11 @@ function formatTokens(n: number): string {
 }
 
 /**
- * Trigger: OR logic — 50% of window OR 25% (floor 100k, cap 200k).
- * Throttle: AND logic — skip only when BOTH deltas are below threshold.
+ * Trigger: percent >= hintPercent(window).
+ * Throttle: skip when BOTH deltas are below threshold.
  *
  * 128k → first at 64k (50%), then ~72k, 80k… (percent delta ~6k dominates)
- * 1m   → first at 200k (token cap), then ~225k, 250k… (token delta ~25k dominates)
+ * 1m   → first at 128k (13%), then ~153k, 178k… (token delta ~25k dominates)
  */
 function shouldInject(
 	usage: { tokens: number | null; percent: number | null; contextWindow: number },
@@ -36,8 +36,7 @@ function shouldInject(
 	const tokens = usage.tokens ?? 0;
 	const window = usage.contextWindow;
 
-	const tokenThreshold = Math.min(TOKEN_THRESHOLD_CAP, Math.max(TOKEN_THRESHOLD_FLOOR, Math.round(window * TOKEN_THRESHOLD_RATIO)));
-	if (percent < DEFAULT_PERCENT_THRESHOLD && tokens < tokenThreshold) return false;
+	if (percent < hintPercent(window)) return false;
 
 	const percentDelta = 5;
 	const tokenDelta = Math.max(10_000, Math.round(window * 0.025));
@@ -109,13 +108,14 @@ export default function (pi: ExtensionAPI) {
 		throttle.percent = percent;
 		throttle.tokens = tokens;
 
-		const urgency = percent >= 80 || tokens >= window * 0.8
-			? " Approaching context limit."
-			: "";
+		const priceCliff = tokens >= 200_000;
+		const escalate = percent >= 80 || tokens >= 200_000;
+		const tag = priceCliff ? " [! >200k]" : "";
+		const action = escalate ? "compact tool recommended" : "consider compact tool";
 
 		event.messages.push({
 			role: "user",
-			content: `[Context: ${formatTokens(tokens)}/${formatTokens(window)} (${percent}%)]${urgency} Consider using the compact tool.`,
+			content: `[ctx ${formatTokens(tokens)}/${formatTokens(window)} ${percent}%]${tag} ${action}`,
 			timestamp: Date.now(),
 		} as any);
 	});

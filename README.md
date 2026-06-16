@@ -2,6 +2,8 @@
 
 Pi extension that lets the LLM manage its own context compaction. The model decides when to compact based on task state — no auto-triggers. Context hints keep it aware of usage.
 
+The model sees usage hints like `[ctx 128k/1m 13%] consider compact tool` and decides when to compact — after finishing a feature, not mid-edit.
+
 ## Installation
 
 ```bash
@@ -13,6 +15,52 @@ Or copy to `~/.pi/agent/extensions/` (global) or `.pi/extensions/` (project-loca
 ```bash
 cp -r . ~/.pi/agent/extensions/pi-compactor
 ```
+
+## How it works
+
+1. As context fills, pi-compactor injects hint messages: `[ctx 128k/1m 13%] consider compact tool`
+2. The model calls `compact` with optional preservation instructions
+3. pi reloads the session with the summary and sends "Continue."
+
+Hints escalate as usage grows:
+
+```
+[ctx 64k/128k 50%] consider compact tool
+[ctx 100k/128k 78%] consider compact tool
+[ctx 200k/1m 20%] [! >200k] compact tool recommended
+```
+
+Throttled — the extension waits for meaningful changes (5% or ~2.5% of window in tokens) before injecting another hint. Throttle resets on compaction, session start, and tree changes.
+
+### When hints begin
+
+| Context window | First hint at |
+|----------------|---------------|
+| ≤256k | 50% |
+| 512k | 25% |
+| 1m | 13% |
+
+The breakpoint is ~128k tokens. Smaller windows hit 50% first; larger windows hit the token threshold first.
+
+### Escalation
+
+| Condition | Message |
+|-----------|---------|
+| < 80% and < 200k tokens | `consider compact tool` |
+| ≥ 80% or ≥ 200k tokens | `compact tool recommended` |
+| ≥ 200k tokens | `[! >200k] compact tool recommended` |
+
+## Usage
+
+Registers a `compact` tool the model calls when it decides to compact:
+
+```
+compact(instructions="preserve API design decisions, current task: auth refactor")
+```
+
+The `instructions` parameter tells the compaction model what to prioritize in the summary.
+
+Errors (session too small, already compacted this turn) are logged, not surfaced to the model.
 
 ## Compaction model
 
@@ -30,17 +78,7 @@ Or configure in `compaction-policy.json` (project-local `.pi/` or global `~/.pi/
 }
 ```
 
-The flag overrides the config file. If neither is set, pi uses its default compaction model.
-
-## Usage
-
-Registers a `compact` tool. After compaction, sends a continuation message so the model keeps working. Errors (session too small, already compacted) are logged, not surfaced to the LLM.
-
-Provide optional instructions to focus the summary:
-
-```
-compact(instructions="preserve API design decisions")
-```
+Resolution order: `--compaction-model` flag → project config → global config → pi default.
 
 ## License
 

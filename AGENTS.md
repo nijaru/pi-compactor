@@ -34,14 +34,6 @@ Hints skip unless `percent - last.percent >= 5` OR `tokens - last.tokens >= max(
 
 Format: `provider/model-id` (e.g., `openrouter/deepseek/deepseek-v4-flash`). Resolved via `ctx.modelRegistry`.
 
-## API notes
-
-- `ctx.compact()` in tool execute is safe. It queues compaction after the current turn, doesn't abort mid-execution.
-- `terminate: true` is not needed. Let the agent continue working after triggering compaction.
-- Compaction fires after the turn completes, so the tool result is already committed to context.
-- `session_before_compact` hook lets the extension provide a custom compaction model. Return `undefined` to fall back to pi default.
-- Context hints use `pi.on("context")` to inject messages into `event.messages`.
-
 ## Files
 
 ```

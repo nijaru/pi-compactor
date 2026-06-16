@@ -1,8 +1,8 @@
 # pi-compactor
 
-Pi extension that lets the LLM manage its own context compaction. The model decides when to compact based on task state — no auto-triggers. Context hints keep it aware of usage.
+Pi extension that lets the LLM manage its own context compaction. The model decides when to compact based on task state. No auto-triggers. Context hints keep it aware of usage.
 
-The model sees usage hints like `[ctx 128k/1m 13%] consider compact tool` and decides when to compact — after finishing a feature, not mid-edit.
+The model sees usage hints like `[ctx 128k/1m 13%] consider compact tool` and decides when to compact after finishing a feature, not mid-edit.
 
 ## Installation
 
@@ -30,7 +30,7 @@ First hint at 128k tokens or 50% of window (whichever comes first). Escalates to
 [ctx 200k/1m 20%] [! >200k] compact tool recommended
 ```
 
-Throttled — waits for meaningful changes (5% or ~2.5% of window in tokens) before injecting another hint. Resets on compaction, session start, and tree changes.
+Hint injection only fires after meaningful context changes (5% or ~2.5% of window in tokens). Resets on compaction, session start, and tree changes.
 
 ## Usage
 

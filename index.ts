@@ -43,31 +43,30 @@ function shouldInject(
 	return percent - last.percent >= percentDelta || tokens - last.tokens >= tokenDelta;
 }
 
-/** Read compaction model from flag, then project config, then global config. */
-function readModelSelector(pi: ExtensionAPI): string | undefined {
+/** Read model selectors from flag, then project config, then global config. Returns ordered list for fallback chain. */
+function readModelSelectors(pi: ExtensionAPI): string[] {
 	const flag = pi.getFlag("compaction-model") as string | undefined;
-	if (flag) return flag;
+	if (flag) return [flag];
 
 	for (const configPath of [PROJECT_CONFIG, GLOBAL_CONFIG]) {
 		try {
 			if (!existsSync(configPath)) continue;
 			const json = JSON.parse(readFileSync(configPath, "utf8"));
-			if (Array.isArray(json.models) && typeof json.models[0] === "string") return json.models[0];
+			if (Array.isArray(json.models)) return json.models.filter((m: unknown) => typeof m === "string");
 		} catch {
 			// ignore malformed config
 		}
 	}
-	return undefined;
+	return [];
 }
 
-/** Resolve model selector string to { model, apiKey, headers } via registry. */
-async function resolveCompactionModel(pi: ExtensionAPI, ctx: ExtensionContext) {
-	const selector = readModelSelector(pi);
-	if (!selector) return undefined;
+type ResolvedModel = { model: any; apiKey: string; headers: Record<string, string> };
 
+/** Resolve a single model selector to { model, apiKey, headers } via registry. */
+async function resolveOne(selector: string, ctx: ExtensionContext): Promise<ResolvedModel | undefined> {
 	const slash = selector.indexOf("/");
 	if (slash === -1) {
-		console.error(`[pi-compactor] invalid compaction-model format: "${selector}" (expected provider/model-id)`);
+		console.error(`[pi-compactor] invalid model format: "${selector}" (expected provider/model-id)`);
 		return undefined;
 	}
 
@@ -77,17 +76,17 @@ async function resolveCompactionModel(pi: ExtensionAPI, ctx: ExtensionContext) {
 	try {
 		const model = ctx.modelRegistry.find(provider, modelId);
 		if (!model) {
-			console.error(`[pi-compactor] compaction model not found: ${selector}`);
+			console.error(`[pi-compactor] model not found: ${selector}`);
 			return undefined;
 		}
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 		if (!auth.ok) {
-			console.error(`[pi-compactor] compaction model auth failed: ${auth.error}`);
+			console.error(`[pi-compactor] model auth failed for ${selector}: ${auth.error}`);
 			return undefined;
 		}
-		return { model, apiKey: auth.apiKey, headers: auth.headers };
+		return { model, apiKey: auth.apiKey!, headers: auth.headers! };
 	} catch (err) {
-		console.error(`[pi-compactor] failed to resolve compaction model:`, err);
+		console.error(`[pi-compactor] failed to resolve ${selector}:`, err);
 		return undefined;
 	}
 }
@@ -127,24 +126,36 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
-		const resolved = await resolveCompactionModel(pi, ctx);
-		if (!resolved) return undefined;
+		const selectors = readModelSelectors(pi);
+		const maxAttempts = 2; // retry each model once on transient failure
 
-		try {
-			const result = await compact(
-				event.preparation,
-				resolved.model,
-				resolved.apiKey,
-				resolved.headers,
-				event.customInstructions,
-				event.signal,
-			);
-			return { compaction: result };
-		} catch (err) {
-			if (event.signal.aborted) return undefined;
-			console.error(`[pi-compactor] compaction with ${resolved.model.name} failed, falling back to default:`, err);
-			return undefined;
+		for (const selector of selectors) {
+			const resolved = await resolveOne(selector, ctx);
+			if (!resolved) continue;
+
+			for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+				try {
+					const result = await compact(
+						event.preparation,
+						resolved.model,
+						resolved.apiKey,
+						resolved.headers,
+						event.customInstructions,
+						event.signal,
+					);
+					return { compaction: result };
+				} catch (err) {
+					if (event.signal.aborted) return undefined;
+					if (attempt < maxAttempts) {
+						await new Promise(r => setTimeout(r, 1000 * attempt));
+						continue;
+					}
+					console.error(`[pi-compactor] ${selector} failed after ${maxAttempts} attempts, trying next model`);
+				}
+			}
 		}
+		// all models exhausted — fall back to pi default
+		return undefined;
 	});
 
 	// Reset throttle on context changes

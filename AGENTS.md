@@ -1,44 +1,23 @@
 # pi-compactor
 
-Pi extension for model-driven context compaction. No auto-triggers — the LLM decides when to compact based on context hints.
+Pi extension for model-driven context compaction.
 
-## Design
+## Design principles
 
-- Context hints inject usage messages into the conversation so the model can make informed compaction decisions.
-- The `compact` tool calls pi's built-in `ctx.compact()`. No custom summarization or cache-busting.
-- Compaction model can be overridden via `--compaction-model` flag or `compaction-policy.json`.
+- The LLM decides when to compact. No auto-triggers, no threshold-based firing.
+- Context hints inform the model; they don't force action.
+- Use pi's built-in compaction. No custom summarization, no cache-busting.
+- Compaction model is configurable but optional — pi's default works fine.
 
-## Hint thresholds
+## Conventions
 
-`hintPercent(window)` returns `min(50, round(128000 / window * 100))`.
+- Single file (`index.ts`). No splitting unless it grows past ~300 lines.
+- All thresholds and tuning constants live in source with comments, not in config files.
+- Config is for the compaction model only. Don't add threshold config — those are design decisions, not user preferences.
+- Test against real sessions. Threshold tuning requires observing actual context usage patterns.
 
-- ≤256k window: first hint at 50%
-- 512k: 25%
-- 1m: 13%
+## Don't
 
-The breakpoint is ~128k tokens. Smaller windows hit 50% first; larger windows hit the token threshold first.
-
-### Escalation
-
-- `< 80% && < 200k tokens`: `consider compact tool`
-- `≥ 80% || ≥ 200k tokens`: `compact tool recommended`
-- `≥ 200k tokens`: adds `[! >200k]` tag (price cliff for many providers)
-
-### Throttle
-
-Hints skip unless `percent - last.percent >= 5` OR `tokens - last.tokens >= max(10000, window * 0.025)`. Resets on `session_compact`, `session_start`, `session_tree`.
-
-## Compaction model resolution
-
-`--compaction-model` flag → `.pi/compaction-policy.json` (project) → `~/.pi/agent/compaction-policy.json` (global) → pi default.
-
-Format: `provider/model-id` (e.g., `openrouter/deepseek/deepseek-v4-flash`). Resolved via `ctx.modelRegistry`.
-
-## Files
-
-```
-index.ts      — Extension entry: hint injection, compact tool, compaction model hook
-package.json  — npm metadata, pi extension config
-README.md     — User-facing docs
-AGENTS.md     — This file
-```
+- Add auto-trigger fallbacks. The model-driven approach is the point of this extension.
+- Add threshold configuration. The values are carefully chosen; user tuning would degrade behavior.
+- Add telemetry or logging beyond `console.error` for failed operations.

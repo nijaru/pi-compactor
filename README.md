@@ -22,7 +22,7 @@ cp -r . ~/.pi/agent/extensions/pi-compactor
 2. The model calls `compact` with optional preservation instructions
 3. pi reloads the session with the summary and sends "Continue."
 
-Hints escalate as usage grows:
+First hint at 128k tokens or 50% of window (whichever comes first). Escalates to `compact tool recommended` at 80% or 200k tokens:
 
 ```
 [ctx 64k/128k 50%] consider compact tool
@@ -30,25 +30,7 @@ Hints escalate as usage grows:
 [ctx 200k/1m 20%] [! >200k] compact tool recommended
 ```
 
-Throttled — the extension waits for meaningful changes (5% or ~2.5% of window in tokens) before injecting another hint. Throttle resets on compaction, session start, and tree changes.
-
-### When hints begin
-
-| Context window | First hint at |
-|----------------|---------------|
-| ≤256k | 50% |
-| 512k | 25% |
-| 1m | 13% |
-
-The breakpoint is ~128k tokens. Smaller windows hit 50% first; larger windows hit the token threshold first.
-
-### Escalation
-
-| Condition | Message |
-|-----------|---------|
-| < 80% and < 200k tokens | `consider compact tool` |
-| ≥ 80% or ≥ 200k tokens | `compact tool recommended` |
-| ≥ 200k tokens | `[! >200k] compact tool recommended` |
+Throttled — waits for meaningful changes (5% or ~2.5% of window in tokens) before injecting another hint. Resets on compaction, session start, and tree changes.
 
 ## Usage
 

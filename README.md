@@ -10,12 +10,6 @@ The model sees usage hints like `[ctx 128k/1m 13%] consider compact tool` and de
 pi install git:github.com/nijaru/pi-compactor
 ```
 
-Or copy to `~/.pi/agent/extensions/` (global) or `.pi/extensions/` (project-local):
-
-```bash
-cp -r . ~/.pi/agent/extensions/pi-compactor
-```
-
 ## How it works
 
 1. As context fills, pi-compactor injects hint messages: `[ctx 128k/1m 13%] consider compact tool`

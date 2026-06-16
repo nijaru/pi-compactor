@@ -26,7 +26,9 @@ First hint at 128k tokens or 50% of window, then every 5%. Escalates at 80% or 2
 
 ```
 [ctx 64k/128k 50%] consider compact tool
+
 [ctx 100k/128k 78%] consider compact tool
+
 [ctx 200k/1m 20%] [! >200k] compact tool recommended
 ```
 

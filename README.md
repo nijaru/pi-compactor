@@ -32,19 +32,7 @@ First hint at 128k tokens or 50% of window, then every 5%. Escalates at 80% or 2
 [ctx 200k/1m 20%] [! >200k] compact tool recommended
 ```
 
-## Usage
-
-Registers a `compact` tool the model calls when it decides to compact:
-
-```
-compact(instructions="preserve API design decisions, current task: auth refactor")
-```
-
-The `instructions` parameter tells the compaction model what to prioritize in the summary.
-
-Errors (session too small, already compacted this turn) are logged, not surfaced to the model.
-
-## Compaction model
+## Configuration
 
 Use a cheaper/faster model for compaction summaries via `--compaction-model`:
 

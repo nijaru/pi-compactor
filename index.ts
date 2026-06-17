@@ -110,7 +110,7 @@ export default function (pi: ExtensionAPI) {
 		const priceCliff = tokens >= 200_000;
 		const escalate = percent >= 80 || tokens >= 200_000;
 		const tag = priceCliff ? " [! >200k]" : "";
-		const action = escalate ? "compact tool recommended" : "consider compact tool";
+		const action = escalate ? "compact soon" : "context growing";
 
 		event.messages.push({
 			role: "user",
@@ -167,14 +167,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "compact",
 		label: "Compact",
-		description: "Compact context by summarizing older messages to free space. Use proactively at task boundaries or when context is getting large; no user permission is needed.",
-		promptSnippet: "Proactively compact at task boundaries or before context gets full",
+		description: "Compact context by summarizing older messages to free space.",
+		promptSnippet: "Compact at task boundaries when context is substantial",
 		promptGuidelines: [
-			"Compact proactively after completing a task, feature, bug fix, research pass, or before switching focus",
-			"Compact when context is getting large; do not wait until it is full",
+			"Compact when you've finished a task or phase — use context hints to gauge urgency, not to trigger compaction",
 			"No user permission is needed; this is your context management tool",
 			"Include instructions for what to preserve: current task, changed files, decisions, blockers, and next command",
-			"Avoid compacting mid-task unless context is near the limit; preserve active state first",
 			"After compacting, re-read active files before continuing",
 		],
 		parameters: Type.Object({

@@ -170,10 +170,11 @@ export default function (pi: ExtensionAPI) {
 		description: "Compact context by summarizing older messages to free space.",
 		promptSnippet: "Compact at task boundaries when context is substantial",
 		promptGuidelines: [
-			"Compact when you've finished a task or phase — use context hints to gauge urgency, not to trigger compaction",
-			"No user permission is needed; this is your context management tool",
-			"Include instructions for what to preserve: current task, changed files, decisions, blockers, and next command",
-			"After compacting, re-read active files before continuing",
+			"At a genuine boundary — the task you were given is complete and verified, or you're switching to unrelated work — compact once context hints are firing. If no hints have fired, you have room; don't bother.",
+			"Mid-task — you know what you're doing next and it's part of the same effort — don't compact on 'context growing' hints; that's awareness, not a trigger. Only compact if hints escalate to 'compact soon' or '! >200k', preserving active state in your instructions.",
+			"No user permission needed; this is your context management tool.",
+			"Include instructions for what to preserve: current task, changed files, decisions, blockers, and next command.",
+			"After compacting, re-read active files before continuing.",
 		],
 		parameters: Type.Object({
 			instructions: Type.Optional(

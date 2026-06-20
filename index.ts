@@ -107,14 +107,13 @@ export default function (pi: ExtensionAPI) {
 		throttle.percent = percent;
 		throttle.tokens = tokens;
 
-		const priceCliff = tokens >= 200_000;
-		const escalate = percent >= 80 || tokens >= 200_000;
-		const tag = priceCliff ? " [! >200k]" : "";
-		const action = escalate ? "compact soon" : "context growing";
+		// Usage data only. Labels like "context growing" prime reflexive
+		// compaction; the number is the signal. [>200k] flags a cost tier.
+		const marker = tokens >= 200_000 ? " [>200k]" : "";
 
 		event.messages.push({
 			role: "user",
-			content: `[ctx ${formatTokens(tokens)}/${formatTokens(window)} ${percent}%]${tag} ${action}`,
+			content: `[ctx ${formatTokens(tokens)}/${formatTokens(window)}]${marker}`,
 			timestamp: Date.now(),
 		} as any);
 	});
@@ -167,11 +166,11 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "compact",
 		label: "Compact",
-		description: "Compact context by summarizing older messages to free space.",
-		promptSnippet: "Compact at task boundaries when context is substantial",
+		description: "Trigger context compaction.",
+		promptSnippet: "Compact context yourself at task boundaries",
 		promptGuidelines: [
-			"At a genuine boundary — the task you were given is complete and verified, or you're switching to unrelated work — compact once context hints are firing. If no hints have fired, you have room; don't bother.",
-			"Mid-task — you know what you're doing next and it's part of the same effort — don't compact on 'context growing' hints; that's awareness, not a trigger. Only compact if hints escalate to 'compact soon' or '! >200k', preserving active state in your instructions.",
+			"At a genuine boundary — the task you were given is complete and verified, or you're switching to unrelated work — compact to clear context that won't serve what's next. If no [ctx] hint has fired, you have room; don't bother.",
+			"Mid-task — you know what you're doing next and it's part of the same effort — don't compact. A [ctx] hint reports usage; it's awareness, not a trigger.",
 			"No user permission needed; this is your context management tool.",
 			"Include instructions for what to preserve: current task, changed files, decisions, blockers, and next command.",
 			"After compacting, re-read active files before continuing.",
@@ -187,7 +186,7 @@ export default function (pi: ExtensionAPI) {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			ctx.compact({
 				customInstructions: params.instructions,
-				onComplete: () => setTimeout(() => pi.sendUserMessage("Continue."), 0),
+				onComplete: () => pi.sendUserMessage("Continue.", { deliverAs: "followUp" }),
 				onError: (error) => console.error("[pi-compactor] compaction failed:", error.message),
 			});
 			return {

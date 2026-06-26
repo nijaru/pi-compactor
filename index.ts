@@ -169,8 +169,8 @@ export default function (pi: ExtensionAPI) {
 		description: "Trigger context compaction.",
 		promptSnippet: "Compact context yourself at task boundaries",
 		promptGuidelines: [
-			"At a genuine boundary — the task you were given is complete and verified, or you're switching to unrelated work — compact to clear context that won't serve what's next. If no [ctx] hint has fired, you have room; don't bother.",
-			"Mid-task — you know what you're doing next and it's part of the same effort — don't compact. A [ctx] hint reports usage; it's awareness, not a trigger.",
+			"DEFER mid-task: If you have a clear next step in the current work — a file to write, a change to verify, a bug to finish fixing — do NOT compact. A [ctx] hint is informational, not a trigger. Keep working.",
+			"Compact at genuine boundaries: the task is complete and verified, or you're switching to unrelated work. If no [ctx] hint has fired, you have room; don't bother.",
 			"No user permission needed; this is your context management tool.",
 			"Include instructions for what to preserve: current task, changed files, decisions, blockers, and next command.",
 			"After compacting, re-read active files before continuing.",

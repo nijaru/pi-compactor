@@ -12,7 +12,8 @@
     "declarationMap": true,
     "sourceMap": true,
     "outDir": "./dist",
-    "lib": ["ES2022"]
+    "lib": ["ES2022"],
+    "types": ["node", "bun"]
   },
   "include": ["*.ts"],
   "exclude": ["node_modules", "dist"]

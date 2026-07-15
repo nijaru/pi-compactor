@@ -1,104 +1,98 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { compact } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
 import { Type } from "typebox";
+import {
+	errorSummary,
+	formatTokens,
+	hintPercent,
+	isTransientError,
+	isUsableCompactionResult,
+	readModelSelectors,
+	safeForLog,
+	shouldInject,
+} from "./policy";
 
-const GLOBAL_CONFIG = join(homedir(), ".pi", "agent", "compaction-policy.json");
-const PROJECT_CONFIG = ".pi/compaction-policy.json";
+export { errorSummary, formatTokens, hintPercent, isTransientError, isUsableCompactionResult, readModelSelectors, shouldInject } from "./policy";
+export type { ContextUsageLike } from "./policy";
 
-// ── Context hint thresholds ─────────────────────────────────────────────
-// ≤128k: 50% (hardware-constrained windows, model handles full context fine)
-// >128k: 128k tokens (quality degradation zone, proactive before 200k price cliff)
-function hintPercent(window: number): number {
-	return Math.min(50, Math.round(128_000 / window * 100));
+const MAX_ATTEMPTS = 2;
+const RETRY_DELAY_MS = 1_000;
+
+type CompactionModel = Parameters<typeof compact>[1];
+type ResolvedModel = {
+	model: CompactionModel;
+	apiKey?: string;
+	headers?: Record<string, string>;
+	env?: Record<string, string>;
+};
+
+function sleep(ms: number, signal: AbortSignal): Promise<boolean> {
+	if (signal.aborted) return Promise.resolve(false);
+	return new Promise((resolve) => {
+		let timer: ReturnType<typeof setTimeout>;
+		const onAbort = () => {
+			clearTimeout(timer);
+			signal.removeEventListener("abort", onAbort);
+			resolve(false);
+		};
+		timer = setTimeout(() => {
+			signal.removeEventListener("abort", onAbort);
+			resolve(true);
+		}, ms);
+		signal.addEventListener("abort", onAbort, { once: true });
+		if (signal.aborted) onAbort();
+	});
 }
 
-function formatTokens(n: number): string {
-	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
-	if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
-	return String(n);
-}
-
-/**
- * Trigger: percent >= hintPercent(window).
- * Throttle: skip when BOTH deltas are below threshold.
- *
- * 128k → first at 64k (50%), then ~72k, 80k… (percent delta ~6k dominates)
- * 1m   → first at 128k (13%), then ~153k, 178k… (token delta ~25k dominates)
- */
-function shouldInject(
-	usage: { tokens: number | null; percent: number | null; contextWindow: number },
-	last: { percent: number; tokens: number },
-): boolean {
-	const percent = usage.percent ?? 0;
-	const tokens = usage.tokens ?? 0;
-	const window = usage.contextWindow;
-
-	if (percent < hintPercent(window)) return false;
-
-	const percentDelta = 5;
-	const tokenDelta = Math.max(10_000, Math.round(window * 0.025));
-	return percent - last.percent >= percentDelta || tokens - last.tokens >= tokenDelta;
-}
-
-/** Read model selectors from flag, then project config, then global config. Returns ordered list for fallback chain. */
-function readModelSelectors(pi: ExtensionAPI): string[] {
-	const flag = pi.getFlag("compaction-model") as string | undefined;
-	if (flag) return [flag];
-
-	for (const configPath of [PROJECT_CONFIG, GLOBAL_CONFIG]) {
-		try {
-			if (!existsSync(configPath)) continue;
-			const json = JSON.parse(readFileSync(configPath, "utf8"));
-			if (Array.isArray(json.models)) return json.models.filter((m: unknown) => typeof m === "string");
-		} catch {
-			// ignore malformed config
-		}
-	}
-	return [];
-}
-
-type ResolvedModel = { model: any; apiKey: string; headers: Record<string, string> };
-
-/** Resolve a single model selector to { model, apiKey, headers } via registry. */
+/** Resolve a single model selector to { model, apiKey, headers, env } via registry. */
 async function resolveOne(selector: string, ctx: ExtensionContext): Promise<ResolvedModel | undefined> {
 	const slash = selector.indexOf("/");
-	if (slash === -1) {
-		console.error(`[pi-compactor] invalid model format: "${selector}" (expected provider/model-id)`);
+	if (slash <= 0 || slash === selector.length - 1) {
+		console.error(`[pi-compactor] invalid model format: "${safeForLog(selector)}" (expected provider/model-id)`);
 		return undefined;
 	}
 
-	const provider = selector.slice(0, slash);
-	const modelId = selector.slice(slash + 1);
+	const provider = selector.slice(0, slash).trim();
+	const modelId = selector.slice(slash + 1).trim();
+	if (!provider || !modelId) {
+		console.error(`[pi-compactor] invalid model format: "${safeForLog(selector)}" (expected provider/model-id)`);
+		return undefined;
+	}
 
 	try {
 		const model = ctx.modelRegistry.find(provider, modelId);
 		if (!model) {
-			console.error(`[pi-compactor] model not found: ${selector}`);
+			console.error(`[pi-compactor] model not found: ${safeForLog(selector)}`);
 			return undefined;
 		}
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 		if (!auth.ok) {
-			console.error(`[pi-compactor] model auth failed for ${selector}: ${auth.error}`);
+			// Auth errors may contain command-backed credential configuration. Do not log them.
+			console.error(`[pi-compactor] model auth failed for ${safeForLog(selector)}`);
 			return undefined;
 		}
-		return { model, apiKey: auth.apiKey!, headers: auth.headers! };
-	} catch (err) {
-		console.error(`[pi-compactor] failed to resolve ${selector}:`, err);
+		return { model, apiKey: auth.apiKey, headers: auth.headers, env: auth.env };
+	} catch (error) {
+		console.error(`[pi-compactor] failed to resolve ${safeForLog(selector)}: ${errorSummary(error)}`);
 		return undefined;
 	}
 }
 
 export default function (pi: ExtensionAPI) {
-	const throttle = { percent: 0, tokens: 0 };
-	const resetThrottle = () => { throttle.percent = 0; throttle.tokens = 0; };
+	const throttle = { percent: 0, tokens: 0, contextWindow: undefined as number | undefined };
+	const resetThrottle = () => {
+		throttle.percent = 0;
+		throttle.tokens = 0;
+		throttle.contextWindow = undefined;
+	};
+	let compactionInFlight = false;
 
 	// ── Context usage awareness ──────────────────────────────────────────
 	pi.on("context", (event, ctx) => {
 		const usage = ctx.getContextUsage();
-		if (!usage || !shouldInject(usage, throttle)) return;
+		if (!usage) return;
+		if (throttle.contextWindow !== undefined && throttle.contextWindow !== usage.contextWindow) resetThrottle();
+		if (!shouldInject(usage, throttle)) return;
 
 		const percent = usage.percent ?? 0;
 		const tokens = usage.tokens ?? 0;
@@ -106,6 +100,7 @@ export default function (pi: ExtensionAPI) {
 
 		throttle.percent = percent;
 		throttle.tokens = tokens;
+		throttle.contextWindow = window;
 
 		// Usage data only. Labels like "context growing" prime reflexive
 		// compaction; the number is the signal. [>200k] flags a cost tier.
@@ -115,7 +110,7 @@ export default function (pi: ExtensionAPI) {
 			role: "user",
 			content: `[ctx ${formatTokens(tokens)}/${formatTokens(window)}]${marker}`,
 			timestamp: Date.now(),
-		} as any);
+		});
 	});
 
 	// ── Compaction model ────────────────────────────────────────────────
@@ -125,14 +120,15 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
-		const selectors = readModelSelectors(pi);
-		const maxAttempts = 2; // retry each model once on transient failure
+		const selectors = readModelSelectors(pi, ctx);
 
 		for (const selector of selectors) {
-			const resolved = await resolveOne(selector, ctx);
-			if (!resolved) continue;
+			for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+				// Resolve auth for every attempt so command-backed credentials and OAuth
+				// tokens can refresh after a transient request failure.
+				const resolved = await resolveOne(selector, ctx);
+				if (!resolved) break;
 
-			for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 				try {
 					const result = await compact(
 						event.preparation,
@@ -141,26 +137,45 @@ export default function (pi: ExtensionAPI) {
 						resolved.headers,
 						event.customInstructions,
 						event.signal,
+						undefined,
+						undefined,
+						resolved.env,
 					);
-					return { compaction: result };
-				} catch (err) {
-					if (event.signal.aborted) return undefined;
-					if (attempt < maxAttempts) {
-						await new Promise(r => setTimeout(r, 1000 * attempt));
-						continue;
+					if (!isUsableCompactionResult(result)) {
+						console.error(`[pi-compactor] ${safeForLog(selector)} returned an empty compaction summary`);
+						break;
 					}
-					console.error(`[pi-compactor] ${selector} failed after ${maxAttempts} attempts, trying next model`);
+					return { compaction: result };
+				} catch (error) {
+					if (event.signal.aborted || (error instanceof Error && error.name === "AbortError")) return undefined;
+					if (!isTransientError(error) || attempt === MAX_ATTEMPTS) {
+						console.error(`[pi-compactor] ${safeForLog(selector)} failed: ${errorSummary(error)}; trying next model`);
+						break;
+					}
+
+					console.error(
+						`[pi-compactor] ${safeForLog(selector)} transient failure (${errorSummary(error)}); retrying`,
+					);
+					if (!(await sleep(RETRY_DELAY_MS * attempt, event.signal))) return undefined;
 				}
 			}
 		}
-		// all models exhausted — fall back to pi default
+		// All models exhausted — fall back to pi default.
 		return undefined;
 	});
 
-	// Reset throttle on context changes
+	// Reset throttle on context changes.
 	pi.on("session_compact", resetThrottle);
-	pi.on("session_start", resetThrottle);
+	pi.on("session_start", () => {
+		resetThrottle();
+		compactionInFlight = false;
+	});
 	pi.on("session_tree", resetThrottle);
+	pi.on("model_select", resetThrottle);
+	pi.on("session_shutdown", () => {
+		resetThrottle();
+		compactionInFlight = false;
+	});
 
 	// ── Compact tool ─────────────────────────────────────────────────────
 	pi.registerTool({
@@ -183,14 +198,54 @@ export default function (pi: ExtensionAPI) {
 				}),
 			),
 		}),
+		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			ctx.compact({
-				customInstructions: params.instructions,
-				onComplete: () => pi.sendUserMessage("Continue.", { deliverAs: "followUp" }),
-				onError: (error) => console.error("[pi-compactor] compaction failed:", error.message),
-			});
+			if (compactionInFlight) {
+				return {
+					content: [{ type: "text", text: "Compaction is already in progress." }],
+					details: {},
+					isError: true,
+				};
+			}
+
+			compactionInFlight = true;
+			try {
+				ctx.compact({
+					customInstructions: params.instructions,
+					onComplete: () => {
+						compactionInFlight = false;
+						try {
+							pi.sendUserMessage("Continue.", { deliverAs: "followUp" });
+						} catch (error) {
+							console.error(`[pi-compactor] failed to continue after compaction: ${errorSummary(error)}`);
+						}
+					},
+					onError: (error) => {
+						compactionInFlight = false;
+						console.error(`[pi-compactor] compaction failed: ${errorSummary(error)}`);
+						if (error.name === "AbortError" || /cancelled/i.test(error.message)) return;
+						try {
+							pi.sendUserMessage(
+								`Compaction failed (${errorSummary(error)}). Continue without compaction.`,
+								{ deliverAs: "followUp" },
+							);
+						} catch (sendError) {
+							console.error(`[pi-compactor] failed to report compaction failure: ${errorSummary(sendError)}`);
+						}
+					},
+				});
+			} catch (error) {
+				compactionInFlight = false;
+				console.error(`[pi-compactor] failed to trigger compaction: ${errorSummary(error)}`);
+				return {
+					content: [{ type: "text", text: "Unable to trigger compaction." }],
+					details: {},
+					isError: true,
+				};
+			}
+
 			return {
-				content: [{ type: "text", text: "Compaction triggered. Will continue after session reload." }],
+				content: [{ type: "text", text: "Compaction started. The result will be reported when it finishes." }],
 				details: {},
 			};
 		},

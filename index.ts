@@ -209,34 +209,39 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			compactionInFlight = true;
-			try {
-				ctx.compact({
-					customInstructions: params.instructions,
-					onComplete: () => {
-						compactionInFlight = false;
-						try {
-							pi.sendUserMessage("Continue.", { deliverAs: "followUp" });
-						} catch (error) {
-							console.error(`[pi-compactor] failed to continue after compaction: ${errorSummary(error)}`);
-						}
-					},
-					onError: (error) => {
-						compactionInFlight = false;
-						console.error(`[pi-compactor] compaction failed: ${errorSummary(error)}`);
-						if (error.name === "AbortError" || /cancelled/i.test(error.message)) return;
-						try {
-							pi.sendUserMessage(
-								`Compaction failed (${errorSummary(error)}). Continue without compaction.`,
-								{ deliverAs: "followUp" },
-							);
-						} catch (sendError) {
-							console.error(`[pi-compactor] failed to report compaction failure: ${errorSummary(sendError)}`);
-						}
-					},
-				});
-			} catch (error) {
+			const onComplete = () => {
 				compactionInFlight = false;
-				console.error(`[pi-compactor] failed to trigger compaction: ${errorSummary(error)}`);
+				try {
+					pi.sendUserMessage("Continue.", { deliverAs: "followUp" });
+				} catch (error) {
+					console.error(`[pi-compactor] failed to continue after compaction: ${errorSummary(error)}`);
+				}
+			};
+			const onError = (error: Error) => {
+				compactionInFlight = false;
+				console.error(`[pi-compactor] compaction failed: ${errorSummary(error)}`);
+				if (error.name === "AbortError" || /cancelled/i.test(error.message)) return;
+				try {
+					pi.sendUserMessage(
+						`Compaction failed (${errorSummary(error)}). Continue without compaction.`,
+						{ deliverAs: "followUp" },
+					);
+				} catch (sendError) {
+					console.error(`[pi-compactor] failed to report compaction failure: ${errorSummary(sendError)}`);
+				}
+			};
+			try {
+				// Let AgentSession persist this tool result before compact() disconnects
+				// its event stream and snapshots the session branch.
+				setTimeout(() => {
+					try {
+						ctx.compact({ customInstructions: params.instructions, onComplete, onError });
+					} catch (error) {
+						onError(error instanceof Error ? error : new Error(String(error)));
+					}
+				}, 0);
+			} catch (error) {
+				onError(error instanceof Error ? error : new Error(String(error)));
 				return {
 					content: [{ type: "text", text: "Unable to trigger compaction." }],
 					details: {},

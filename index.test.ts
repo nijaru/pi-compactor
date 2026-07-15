@@ -132,6 +132,7 @@ describe("compaction safety helpers", () => {
 describe("compact tool lifecycle", () => {
 	test("serializes in-flight compactions and resumes after completion", async () => {
 		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
+		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
 		const sentMessages: string[] = [];
 		let tool: any;
 		const pi = {
@@ -155,11 +156,15 @@ describe("compact tool lifecycle", () => {
 		const second = await tool.execute("two", {}, undefined, undefined, context);
 		expect(first.isError).toBeUndefined();
 		expect(second.isError).toBe(true);
+		expect(compactRequests).toHaveLength(0);
+		await flushTimers();
 		expect(compactRequests).toHaveLength(1);
 
 		compactRequests[0].onComplete();
 		const third = await tool.execute("three", {}, undefined, undefined, context);
 		expect(third.isError).toBeUndefined();
+		expect(compactRequests).toHaveLength(1);
+		await flushTimers();
 		expect(compactRequests).toHaveLength(2);
 
 		const originalConsoleError = console.error;
@@ -168,6 +173,8 @@ describe("compact tool lifecycle", () => {
 		console.error = originalConsoleError;
 		const fourth = await tool.execute("four", {}, undefined, undefined, context);
 		expect(fourth.isError).toBeUndefined();
+		expect(compactRequests).toHaveLength(2);
+		await flushTimers();
 		expect(compactRequests).toHaveLength(3);
 		expect(sentMessages).toEqual(["Continue.", "Compaction failed (provider failed). Continue without compaction."]);
 	});

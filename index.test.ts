@@ -155,6 +155,7 @@ describe("compact tool lifecycle", () => {
 		const first = await tool.execute("one", {}, undefined, undefined, context);
 		const second = await tool.execute("two", {}, undefined, undefined, context);
 		expect(first.isError).toBeUndefined();
+		expect(first.terminate).toBe(true);
 		expect(second.isError).toBe(true);
 		expect(compactRequests).toHaveLength(0);
 		await flushTimers();

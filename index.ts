@@ -252,6 +252,7 @@ export default function (pi: ExtensionAPI) {
 			return {
 				content: [{ type: "text", text: "Compaction started. The result will be reported when it finishes." }],
 				details: {},
+				terminate: true,
 			};
 		},
 	});

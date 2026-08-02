@@ -150,6 +150,7 @@ describe("compact tool lifecycle", () => {
 		expect(tool.executionMode).toBe("sequential");
 
 		const context = {
+			isIdle: () => true,
 			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
 		} as unknown as ExtensionContext;
 		const first = await tool.execute("one", {}, undefined, undefined, context);
@@ -162,6 +163,10 @@ describe("compact tool lifecycle", () => {
 		expect(compactRequests).toHaveLength(1);
 
 		compactRequests[0].onComplete();
+		await flushTimers();
+		compactRequests[0].onComplete();
+		await flushTimers();
+		expect(sentMessages).toEqual(["Continue."]);
 		const third = await tool.execute("three", {}, undefined, undefined, context);
 		expect(third.isError).toBeUndefined();
 		expect(compactRequests).toHaveLength(1);
@@ -172,11 +177,53 @@ describe("compact tool lifecycle", () => {
 		console.error = () => undefined;
 		compactRequests[1].onError(new Error("provider failed"));
 		console.error = originalConsoleError;
+		await flushTimers();
 		const fourth = await tool.execute("four", {}, undefined, undefined, context);
 		expect(fourth.isError).toBeUndefined();
 		expect(compactRequests).toHaveLength(2);
 		await flushTimers();
 		expect(compactRequests).toHaveLength(3);
 		expect(sentMessages).toEqual(["Continue.", "Compaction failed (provider failed). Continue without compaction."]);
+	});
+
+	test("waits for the agent to settle before sending the recovery prompt", async () => {
+		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
+		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
+		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
+		const sentMessages: Array<[string, unknown?]> = [];
+		let idle = false;
+		let tool: any;
+		const pi = {
+			getFlag: () => undefined,
+			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
+			registerFlag: () => undefined,
+			registerTool: (definition: unknown) => {
+				tool = definition;
+			},
+			sendUserMessage: (message: string, options?: unknown) => sentMessages.push([message, options]),
+		} as unknown as ExtensionAPI;
+
+		const { default: registerExtension } = await import("./index");
+		registerExtension(pi);
+		const context = {
+			isIdle: () => idle,
+			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
+		} as unknown as ExtensionContext;
+
+		await tool.execute("one", {}, undefined, undefined, context);
+		await flushTimers();
+		compactRequests[0].onComplete();
+		await flushTimers();
+		expect(sentMessages).toEqual([]);
+		const duplicate = await tool.execute("two", {}, undefined, undefined, context);
+		expect(duplicate.isError).toBe(true);
+
+		idle = true;
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
+		await flushTimers();
+		expect(sentMessages).toEqual([["Continue.", undefined]]);
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
+		await flushTimers();
+		expect(sentMessages).toHaveLength(1);
 	});
 });

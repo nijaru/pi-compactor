@@ -85,7 +85,66 @@ export default function (pi: ExtensionAPI) {
 		throttle.tokens = 0;
 		throttle.contextWindow = undefined;
 	};
+	type PendingResume = {
+		message: string;
+		generation: number;
+	};
 	let compactionInFlight = false;
+	let lifecycleGeneration = 0;
+	let pendingResume: PendingResume | undefined;
+	let resumeTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function clearResumeTimer(): void {
+		if (resumeTimer === undefined) return;
+		clearTimeout(resumeTimer);
+		resumeTimer = undefined;
+	}
+
+	function resetLifecycle(): void {
+		lifecycleGeneration += 1;
+		compactionInFlight = false;
+		pendingResume = undefined;
+		clearResumeTimer();
+	}
+
+	function sendResume(message: string): void {
+		try {
+			void Promise.resolve(pi.sendUserMessage(message)).catch((error) => {
+				console.error(`[pi-compactor] failed to continue after compaction: ${errorSummary(error)}`);
+			});
+		} catch (error) {
+			console.error(`[pi-compactor] failed to continue after compaction: ${errorSummary(error)}`);
+		}
+	}
+
+	function flushPendingResume(ctx: ExtensionContext): void {
+		const pending = pendingResume;
+		if (!pending) return;
+		if (pending.generation !== lifecycleGeneration) {
+			pendingResume = undefined;
+			return;
+		}
+		// Manual compaction disconnects Pi's agent event stream and aborts the
+		// active run. Do not put the recovery prompt into that run's follow-up
+		// queue: it may never be drained after the reconnect.
+		if (!ctx.isIdle()) return;
+		pendingResume = undefined;
+		sendResume(pending.message);
+	}
+
+	function schedulePendingResume(ctx: ExtensionContext): void {
+		if (resumeTimer !== undefined) return;
+		resumeTimer = setTimeout(() => {
+			resumeTimer = undefined;
+			flushPendingResume(ctx);
+		}, 0);
+	}
+
+	function queueResume(message: string, generation: number, ctx: ExtensionContext): void {
+		if (generation !== lifecycleGeneration) return;
+		pendingResume = { message, generation };
+		schedulePendingResume(ctx);
+	}
 
 	// ── Context usage awareness ──────────────────────────────────────────
 	pi.on("context", (event, ctx) => {
@@ -166,15 +225,22 @@ export default function (pi: ExtensionAPI) {
 
 	// Reset throttle on context changes.
 	pi.on("session_compact", resetThrottle);
+	pi.on("agent_settled", (_event, ctx) => {
+		if (!pendingResume) return;
+		schedulePendingResume(ctx);
+	});
 	pi.on("session_start", () => {
 		resetThrottle();
-		compactionInFlight = false;
+		resetLifecycle();
 	});
-	pi.on("session_tree", resetThrottle);
+	pi.on("session_tree", () => {
+		resetThrottle();
+		resetLifecycle();
+	});
 	pi.on("model_select", resetThrottle);
 	pi.on("session_shutdown", () => {
 		resetThrottle();
-		compactionInFlight = false;
+		resetLifecycle();
 	});
 
 	// ── Compact tool ─────────────────────────────────────────────────────
@@ -200,7 +266,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (compactionInFlight) {
+			if (compactionInFlight || pendingResume) {
 				return {
 					content: [{ type: "text", text: "Compaction is already in progress." }],
 					details: {},
@@ -209,26 +275,23 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			compactionInFlight = true;
-			const onComplete = () => {
+			const generation = lifecycleGeneration;
+			let callbackHandled = false;
+			const finish = (message?: string): void => {
+				if (callbackHandled || generation !== lifecycleGeneration) return;
+				callbackHandled = true;
 				compactionInFlight = false;
-				try {
-					pi.sendUserMessage("Continue.", { deliverAs: "followUp" });
-				} catch (error) {
-					console.error(`[pi-compactor] failed to continue after compaction: ${errorSummary(error)}`);
-				}
+				if (message) queueResume(message, generation, ctx);
 			};
+			const onComplete = () => finish("Continue.");
 			const onError = (error: Error) => {
-				compactionInFlight = false;
+				if (callbackHandled || generation !== lifecycleGeneration) return;
 				console.error(`[pi-compactor] compaction failed: ${errorSummary(error)}`);
-				if (error.name === "AbortError" || /cancelled/i.test(error.message)) return;
-				try {
-					pi.sendUserMessage(
-						`Compaction failed (${errorSummary(error)}). Continue without compaction.`,
-						{ deliverAs: "followUp" },
-					);
-				} catch (sendError) {
-					console.error(`[pi-compactor] failed to report compaction failure: ${errorSummary(sendError)}`);
+				if (error.name === "AbortError" || /cancelled/i.test(error.message)) {
+					finish();
+					return;
 				}
+				finish(`Compaction failed (${errorSummary(error)}). Continue without compaction.`);
 			};
 			try {
 				// Let AgentSession persist this tool result before compact() disconnects

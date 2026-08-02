@@ -90,6 +90,7 @@ export default function (pi: ExtensionAPI) {
 		generation: number;
 	};
 	let compactionInFlight = false;
+	let manualCompactionRequested = false;
 	let lifecycleGeneration = 0;
 	let pendingResume: PendingResume | undefined;
 	let resumeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -103,6 +104,7 @@ export default function (pi: ExtensionAPI) {
 	function resetLifecycle(): void {
 		lifecycleGeneration += 1;
 		compactionInFlight = false;
+		manualCompactionRequested = false;
 		pendingResume = undefined;
 		clearResumeTimer();
 	}
@@ -179,6 +181,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
+		// A deferred manual compaction is queued after its tool result is persisted.
+		// Pi may independently notice the same high context usage in the meantime;
+		// let the explicit request own threshold compaction instead of racing it.
+		if (event.reason === "threshold" && manualCompactionRequested) return { cancel: true };
+
 		const selectors = readModelSelectors(pi, ctx);
 
 		for (const selector of selectors) {
@@ -266,7 +273,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (compactionInFlight || pendingResume) {
+			if (compactionInFlight || pendingResume || manualCompactionRequested) {
 				return {
 					content: [{ type: "text", text: "Compaction is already in progress." }],
 					details: {},
@@ -275,17 +282,25 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			compactionInFlight = true;
+			manualCompactionRequested = true;
 			const generation = lifecycleGeneration;
 			let callbackHandled = false;
 			const finish = (message?: string): void => {
 				if (callbackHandled || generation !== lifecycleGeneration) return;
 				callbackHandled = true;
 				compactionInFlight = false;
+				manualCompactionRequested = false;
 				if (message) queueResume(message, generation, ctx);
 			};
 			const onComplete = () => finish("Continue.");
 			const onError = (error: Error) => {
 				if (callbackHandled || generation !== lifecycleGeneration) return;
+				if (/^already compacted$/i.test(error.message.trim())) {
+					// Pi's automatic compaction may win before the deferred manual call
+					// reaches prepareCompaction. The session is already compacted.
+					finish("Continue.");
+					return;
+				}
 				console.error(`[pi-compactor] compaction failed: ${errorSummary(error)}`);
 				if (error.name === "AbortError" || /cancelled/i.test(error.message)) {
 					finish();
@@ -297,6 +312,7 @@ export default function (pi: ExtensionAPI) {
 				// Let AgentSession persist this tool result before compact() disconnects
 				// its event stream and snapshots the session branch.
 				setTimeout(() => {
+					if (generation !== lifecycleGeneration || !manualCompactionRequested) return;
 					try {
 						ctx.compact({ customInstructions: params.instructions, onComplete, onError });
 					} catch (error) {

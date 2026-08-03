@@ -85,15 +85,28 @@ export default function (pi: ExtensionAPI) {
 		throttle.tokens = 0;
 		throttle.contextWindow = undefined;
 	};
+	type PendingCompaction = {
+		id: number;
+		generation: number;
+		instructions?: string;
+		phase: "awaiting-settlement" | "compacting";
+	};
 	type PendingResume = {
 		message: string;
 		generation: number;
 	};
-	let compactionInFlight = false;
-	let manualCompactionRequested = false;
 	let lifecycleGeneration = 0;
+	let nextCompactionId = 1;
+	let pendingCompaction: PendingCompaction | undefined;
 	let pendingResume: PendingResume | undefined;
+	let compactionTimer: ReturnType<typeof setTimeout> | undefined;
 	let resumeTimer: ReturnType<typeof setTimeout> | undefined;
+
+	function clearCompactionTimer(): void {
+		if (compactionTimer === undefined) return;
+		clearTimeout(compactionTimer);
+		compactionTimer = undefined;
+	}
 
 	function clearResumeTimer(): void {
 		if (resumeTimer === undefined) return;
@@ -103,9 +116,9 @@ export default function (pi: ExtensionAPI) {
 
 	function resetLifecycle(): void {
 		lifecycleGeneration += 1;
-		compactionInFlight = false;
-		manualCompactionRequested = false;
+		pendingCompaction = undefined;
 		pendingResume = undefined;
+		clearCompactionTimer();
 		clearResumeTimer();
 	}
 
@@ -143,9 +156,65 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function queueResume(message: string, generation: number, ctx: ExtensionContext): void {
-		if (generation !== lifecycleGeneration) return;
+		if (generation !== lifecycleGeneration || pendingResume) return;
 		pendingResume = { message, generation };
 		schedulePendingResume(ctx);
+	}
+
+	function finishCompaction(
+		id: number,
+		generation: number,
+		ctx: ExtensionContext,
+		resumeMessage?: string,
+	): void {
+		const request = pendingCompaction;
+		if (!request || request.id !== id || request.generation !== generation) return;
+		pendingCompaction = undefined;
+		clearCompactionTimer();
+		if (resumeMessage) queueResume(resumeMessage, generation, ctx);
+	}
+
+	function scheduleCompaction(ctx: ExtensionContext): void {
+		const request = pendingCompaction;
+		if (!request || request.phase !== "awaiting-settlement" || compactionTimer !== undefined) return;
+		const { id, generation } = request;
+		compactionTimer = setTimeout(() => {
+			compactionTimer = undefined;
+			const current = pendingCompaction;
+			if (
+				!current ||
+				current.id !== id ||
+				current.generation !== generation ||
+				current.phase !== "awaiting-settlement" ||
+				generation !== lifecycleGeneration ||
+				!ctx.isIdle()
+			) {
+				return;
+			}
+
+			current.phase = "compacting";
+			const onComplete = () => finishCompaction(id, generation, ctx, "Continue.");
+			const onError = (error: Error) => {
+				const active = pendingCompaction;
+				if (!active || active.id !== id || active.generation !== generation) return;
+				if (/^already compacted$/i.test(error.message.trim())) {
+					finishCompaction(id, generation, ctx, "Continue.");
+					return;
+				}
+				console.error(`[pi-compactor] compaction failed: ${errorSummary(error)}`);
+				if (error.name === "AbortError" || /cancelled/i.test(error.message)) {
+					finishCompaction(id, generation, ctx);
+					return;
+				}
+				finishCompaction(id, generation, ctx, `Compaction failed (${errorSummary(error)}). Continue without compaction.`);
+			};
+
+			try {
+				ctx.compact({ customInstructions: current.instructions, onComplete, onError });
+			} catch (error) {
+				onError(error instanceof Error ? error : new Error(String(error)));
+			}
+		}, 0);
 	}
 
 	// ── Context usage awareness ──────────────────────────────────────────
@@ -181,10 +250,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
-		// A deferred manual compaction is queued after its tool result is persisted.
-		// Pi may independently notice the same high context usage in the meantime;
-		// let the explicit request own threshold compaction instead of racing it.
-		if (event.reason === "threshold" && manualCompactionRequested) return { cancel: true };
+		// A deferred manual compaction starts only after Pi reports the terminating
+		// agent run settled, which is later than tool-result persistence. Pi may
+		// independently notice the same high context usage in the meantime; let the
+		// explicit request own threshold compaction instead of racing it.
+		if (event.reason === "threshold" && pendingCompaction) return { cancel: true };
 
 		const selectors = readModelSelectors(pi, ctx);
 
@@ -230,11 +300,21 @@ export default function (pi: ExtensionAPI) {
 		return undefined;
 	});
 
-	// Reset throttle on context changes.
-	pi.on("session_compact", resetThrottle);
+	// A saved compaction is authoritative even when another extension or /compact
+	// won the race. Reconcile it before ctx.compact's callback so an abandoned
+	// callback cannot leave the tool permanently in flight or resume twice.
+	pi.on("session_compact", (_event, ctx) => {
+		resetThrottle();
+		const request = pendingCompaction;
+		if (request) finishCompaction(request.id, request.generation, ctx, "Continue.");
+	});
 	pi.on("agent_settled", (_event, ctx) => {
-		if (!pendingResume) return;
-		schedulePendingResume(ctx);
+		// ctx.compact disconnects and aborts the active agent stream. Starting it
+		// from the compact tool (even on a zero-delay timer) can detach Pi before
+		// tool-result persistence and turn accounting finish. agent_settled is the
+		// first lifecycle event that guarantees no retry or follow-up remains.
+		if (pendingCompaction?.phase === "awaiting-settlement") scheduleCompaction(ctx);
+		if (pendingResume) schedulePendingResume(ctx);
 	});
 	pi.on("session_start", () => {
 		resetThrottle();
@@ -272,8 +352,8 @@ export default function (pi: ExtensionAPI) {
 			),
 		}),
 		executionMode: "sequential",
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (compactionInFlight || pendingResume || manualCompactionRequested) {
+		async execute(_toolCallId, params) {
+			if (pendingCompaction || pendingResume) {
 				return {
 					content: [{ type: "text", text: "Compaction is already in progress." }],
 					details: {},
@@ -281,52 +361,12 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			compactionInFlight = true;
-			manualCompactionRequested = true;
-			const generation = lifecycleGeneration;
-			let callbackHandled = false;
-			const finish = (message?: string): void => {
-				if (callbackHandled || generation !== lifecycleGeneration) return;
-				callbackHandled = true;
-				compactionInFlight = false;
-				manualCompactionRequested = false;
-				if (message) queueResume(message, generation, ctx);
+			pendingCompaction = {
+				id: nextCompactionId++,
+				generation: lifecycleGeneration,
+				instructions: params.instructions,
+				phase: "awaiting-settlement",
 			};
-			const onComplete = () => finish("Continue.");
-			const onError = (error: Error) => {
-				if (callbackHandled || generation !== lifecycleGeneration) return;
-				if (/^already compacted$/i.test(error.message.trim())) {
-					// Pi's automatic compaction may win before the deferred manual call
-					// reaches prepareCompaction. The session is already compacted.
-					finish("Continue.");
-					return;
-				}
-				console.error(`[pi-compactor] compaction failed: ${errorSummary(error)}`);
-				if (error.name === "AbortError" || /cancelled/i.test(error.message)) {
-					finish();
-					return;
-				}
-				finish(`Compaction failed (${errorSummary(error)}). Continue without compaction.`);
-			};
-			try {
-				// Let AgentSession persist this tool result before compact() disconnects
-				// its event stream and snapshots the session branch.
-				setTimeout(() => {
-					if (generation !== lifecycleGeneration || !manualCompactionRequested) return;
-					try {
-						ctx.compact({ customInstructions: params.instructions, onComplete, onError });
-					} catch (error) {
-						onError(error instanceof Error ? error : new Error(String(error)));
-					}
-				}, 0);
-			} catch (error) {
-				onError(error instanceof Error ? error : new Error(String(error)));
-				return {
-					content: [{ type: "text", text: "Unable to trigger compaction." }],
-					details: {},
-					isError: true,
-				};
-			}
 
 			return {
 				content: [{ type: "text", text: "Compaction started. The result will be reported when it finishes." }],

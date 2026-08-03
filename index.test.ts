@@ -130,14 +130,15 @@ describe("compaction safety helpers", () => {
 });
 
 describe("compact tool lifecycle", () => {
-	test("serializes in-flight compactions and resumes after completion", async () => {
+	test("waits for settlement, serializes in-flight compactions, and resumes after completion", async () => {
 		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
+		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
 		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
 		const sentMessages: string[] = [];
 		let tool: any;
 		const pi = {
 			getFlag: () => undefined,
-			on: () => undefined,
+			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
 			registerFlag: () => undefined,
 			registerTool: (definition: unknown) => {
 				tool = definition;
@@ -160,6 +161,9 @@ describe("compact tool lifecycle", () => {
 		expect(second.isError).toBe(true);
 		expect(compactRequests).toHaveLength(0);
 		await flushTimers();
+		expect(compactRequests).toHaveLength(0);
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
+		await flushTimers();
 		expect(compactRequests).toHaveLength(1);
 
 		compactRequests[0].onComplete();
@@ -171,6 +175,9 @@ describe("compact tool lifecycle", () => {
 		expect(third.isError).toBeUndefined();
 		expect(compactRequests).toHaveLength(1);
 		await flushTimers();
+		expect(compactRequests).toHaveLength(1);
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
+		await flushTimers();
 		expect(compactRequests).toHaveLength(2);
 
 		const originalConsoleError = console.error;
@@ -181,6 +188,7 @@ describe("compact tool lifecycle", () => {
 		const fourth = await tool.execute("four", {}, undefined, undefined, context);
 		expect(fourth.isError).toBeUndefined();
 		expect(compactRequests).toHaveLength(2);
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		await flushTimers();
 		expect(compactRequests).toHaveLength(3);
 		expect(sentMessages).toEqual(["Continue.", "Compaction failed (provider failed). Continue without compaction."]);
@@ -211,6 +219,15 @@ describe("compact tool lifecycle", () => {
 
 		await tool.execute("one", {}, undefined, undefined, context);
 		await flushTimers();
+		expect(compactRequests).toHaveLength(0);
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
+		await flushTimers();
+		expect(compactRequests).toHaveLength(0);
+		idle = true;
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
+		await flushTimers();
+		expect(compactRequests).toHaveLength(1);
+		idle = false;
 		compactRequests[0].onComplete();
 		await flushTimers();
 		expect(sentMessages).toEqual([]);
@@ -255,6 +272,9 @@ describe("compact tool lifecycle", () => {
 		expect(await beforeCompact!({ reason: "threshold" }, context)).toEqual({ cancel: true });
 		await flushTimers();
 		expect(result.terminate).toBe(true);
+		expect(compactRequests).toHaveLength(0);
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
+		await flushTimers();
 		expect(compactRequests).toHaveLength(1);
 
 		compactRequests[0].onComplete();
@@ -264,12 +284,13 @@ describe("compact tool lifecycle", () => {
 
 	test("continues normally when Pi already compacted before the manual request", async () => {
 		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
+		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
 		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
 		const sentMessages: string[] = [];
 		let tool: any;
 		const pi = {
 			getFlag: () => undefined,
-			on: () => undefined,
+			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
 			registerFlag: () => undefined,
 			registerTool: (definition: unknown) => {
 				tool = definition;
@@ -285,9 +306,54 @@ describe("compact tool lifecycle", () => {
 		} as unknown as ExtensionContext;
 
 		await tool.execute("one", {}, undefined, undefined, context);
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		await flushTimers();
+		expect(compactRequests).toHaveLength(1);
 		compactRequests[0].onError(new Error("Already compacted"));
 		await flushTimers();
 		expect(sentMessages).toEqual(["Continue."]);
+	});
+
+	test("reconciles a competing successful compaction and ignores stale callbacks", async () => {
+		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
+		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
+		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
+		const sentMessages: string[] = [];
+		let tool: any;
+		const pi = {
+			getFlag: () => undefined,
+			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
+			registerFlag: () => undefined,
+			registerTool: (definition: unknown) => {
+				tool = definition;
+			},
+			sendUserMessage: (message: string) => sentMessages.push(message),
+		} as unknown as ExtensionAPI;
+
+		const { default: registerExtension } = await import("./index");
+		registerExtension(pi);
+		const context = {
+			isIdle: () => true,
+			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
+		} as unknown as ExtensionContext;
+
+		await tool.execute("one", {}, undefined, undefined, context);
+		handlers.get("session_compact")?.({ type: "session_compact" }, context);
+		await flushTimers();
+		expect(sentMessages).toEqual(["Continue."]);
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
+		await flushTimers();
+		expect(compactRequests).toHaveLength(0);
+
+		await tool.execute("two", {}, undefined, undefined, context);
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
+		await flushTimers();
+		expect(compactRequests).toHaveLength(1);
+		handlers.get("session_compact")?.({ type: "session_compact" }, context);
+		await flushTimers();
+		expect(sentMessages).toEqual(["Continue.", "Continue."]);
+		compactRequests[0].onComplete();
+		await flushTimers();
+		expect(sentMessages).toEqual(["Continue.", "Continue."]);
 	});
 });

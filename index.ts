@@ -26,6 +26,11 @@ type ResolvedModel = {
 	env?: Record<string, string>;
 };
 
+function withoutDeletedHeaders(headers: Record<string, string | null> | undefined): Record<string, string> | undefined {
+	if (!headers) return undefined;
+	return Object.fromEntries(Object.entries(headers).filter(([, value]) => value !== null)) as Record<string, string>;
+}
+
 function sleep(ms: number, signal: AbortSignal): Promise<boolean> {
 	if (signal.aborted) return Promise.resolve(false);
 	return new Promise((resolve) => {
@@ -71,7 +76,13 @@ async function resolveOne(selector: string, ctx: ExtensionContext): Promise<Reso
 			console.error(`[pi-compactor] model auth failed for ${safeForLog(selector)}`);
 			return undefined;
 		}
-		return { model, apiKey: auth.apiKey, headers: auth.headers, env: auth.env };
+		const requestModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
+		return {
+			model: requestModel,
+			apiKey: auth.apiKey,
+			headers: withoutDeletedHeaders(auth.headers),
+			env: auth.env,
+		};
 	} catch (error) {
 		console.error(`[pi-compactor] failed to resolve ${safeForLog(selector)}: ${errorSummary(error)}`);
 		return undefined;
@@ -139,9 +150,8 @@ export default function (pi: ExtensionAPI) {
 			pendingResume = undefined;
 			return;
 		}
-		// Manual compaction disconnects Pi's agent event stream and aborts the
-		// active run. Do not put the recovery prompt into that run's follow-up
-		// queue: it may never be drained after the reconnect.
+		// Manual compaction aborts the active run. Do not put the recovery prompt
+		// into that run's follow-up queue while lifecycle state is being rebuilt.
 		if (!ctx.isIdle()) return;
 		pendingResume = undefined;
 		sendResume(pending.message);
@@ -266,6 +276,15 @@ export default function (pi: ExtensionAPI) {
 				if (!resolved) break;
 
 				try {
+					const provider = ctx.modelRegistry.getProvider(resolved.model.provider);
+					if (!provider?.streamSimple) {
+						console.error(`[pi-compactor] provider unavailable for ${safeForLog(selector)}; trying next model`);
+						break;
+					}
+
+					// Use Pi's composed provider rather than @pi-ai/compat's global
+					// dispatcher. This preserves extension providers, resolved endpoints,
+					// and provider-specific request behavior for compaction calls.
 					const result = await compact(
 						event.preparation,
 						resolved.model,
@@ -274,7 +293,7 @@ export default function (pi: ExtensionAPI) {
 						event.customInstructions,
 						event.signal,
 						undefined,
-						undefined,
+						provider.streamSimple.bind(provider),
 						resolved.env,
 					);
 					if (!isUsableCompactionResult(result)) {
@@ -309,10 +328,10 @@ export default function (pi: ExtensionAPI) {
 		if (request) finishCompaction(request.id, request.generation, ctx, "Continue.");
 	});
 	pi.on("agent_settled", (_event, ctx) => {
-		// ctx.compact disconnects and aborts the active agent stream. Starting it
-		// from the compact tool (even on a zero-delay timer) can detach Pi before
-		// tool-result persistence and turn accounting finish. agent_settled is the
-		// first lifecycle event that guarantees no retry or follow-up remains.
+		// ctx.compact aborts an active operation. Starting it from the compact tool
+		// (even on a zero-delay timer) can race tool-result persistence and turn
+		// accounting. agent_settled is the first lifecycle event that guarantees no
+		// retry or follow-up remains.
 		if (pendingCompaction?.phase === "awaiting-settlement") scheduleCompaction(ctx);
 		if (pendingResume) schedulePendingResume(ctx);
 	});

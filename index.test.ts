@@ -129,6 +129,90 @@ describe("compaction safety helpers", () => {
 	});
 });
 
+describe("configured compaction models", () => {
+	test("uses the composed provider and preserves resolved endpoint/auth", async () => {
+		const handlers = new Map<string, (...args: any[]) => any>();
+		const streamCalls: Array<{ model: any; options: any }> = [];
+		const model = {
+			provider: "custom",
+			id: "summary",
+			api: "custom-api",
+			maxTokens: 1024,
+			reasoning: false,
+		};
+		const provider = {
+			streamSimple: (requestModel: any, _context: unknown, options: unknown) => {
+				streamCalls.push({ model: requestModel, options });
+				return {
+					result: async () => ({
+						role: "assistant",
+						content: [{ type: "text", text: "runtime summary" }],
+						api: "custom-api",
+						provider: "custom",
+						model: "summary",
+						usage: {
+							input: 1,
+							output: 1,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 2,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: Date.now(),
+					}),
+				};
+			},
+		};
+		const pi = {
+			getFlag: (name: string) => (name === "compaction-model" ? "custom/summary" : undefined),
+			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
+			registerFlag: () => undefined,
+			registerTool: () => undefined,
+		} as unknown as ExtensionAPI;
+		const { default: registerExtension } = await import("./index");
+		registerExtension(pi);
+
+		const context = {
+			modelRegistry: {
+				find: () => model,
+				getApiKeyAndHeaders: async () => ({
+					ok: true,
+					apiKey: "resolved-key",
+					headers: { "x-test": "value", "x-delete": null },
+					baseUrl: "https://resolved.example/v1",
+					env: { REGION: "test" },
+				}),
+				getProvider: () => provider,
+			},
+		} as unknown as ExtensionContext;
+		const beforeCompact = handlers.get("session_before_compact");
+		const result = await beforeCompact!({
+			reason: "manual",
+			customInstructions: "preserve decisions",
+			signal: new AbortController().signal,
+			preparation: {
+				firstKeptEntryId: "keep",
+				messagesToSummarize: [{ role: "user", content: "old context", timestamp: Date.now() }],
+				turnPrefixMessages: [],
+				isSplitTurn: false,
+				tokensBefore: 100,
+				fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+				settings: { enabled: true, reserveTokens: 1000, keepRecentTokens: 100 },
+			},
+		}, context);
+
+		expect(result?.compaction.summary).toBe("runtime summary");
+		expect(streamCalls).toHaveLength(1);
+		expect(streamCalls[0].model.baseUrl).toBe("https://resolved.example/v1");
+		expect(streamCalls[0].options).toMatchObject({
+			apiKey: "resolved-key",
+			headers: { "x-test": "value" },
+			env: { REGION: "test" },
+		});
+	});
+});
+
 describe("compact tool lifecycle", () => {
 	test("waits for settlement, serializes in-flight compactions, and resumes after completion", async () => {
 		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];

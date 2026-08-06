@@ -440,4 +440,43 @@ describe("compact tool lifecycle", () => {
 		await flushTimers();
 		expect(sentMessages).toEqual(["Continue.", "Continue."]);
 	});
+
+	test("invalidates deferred callbacks when the session lifecycle resets", async () => {
+		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
+		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
+		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
+		const sentMessages: string[] = [];
+		let tool: any;
+		const pi = {
+			getFlag: () => undefined,
+			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
+			registerFlag: () => undefined,
+			registerTool: (definition: unknown) => {
+				tool = definition;
+			},
+			sendUserMessage: (message: string) => sentMessages.push(message),
+		} as unknown as ExtensionAPI;
+
+		const { default: registerExtension } = await import("./index");
+		registerExtension(pi);
+		const context = {
+			isIdle: () => true,
+			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
+		} as unknown as ExtensionContext;
+
+		await tool.execute("one", {}, undefined, undefined, context);
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
+		handlers.get("session_start")?.({ type: "session_start" }, context);
+		await flushTimers();
+		expect(compactRequests).toHaveLength(0);
+
+		await tool.execute("two", {}, undefined, undefined, context);
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
+		await flushTimers();
+		expect(compactRequests).toHaveLength(1);
+		handlers.get("session_start")?.({ type: "session_start" }, context);
+		compactRequests[0].onComplete();
+		await flushTimers();
+		expect(sentMessages).toEqual([]);
+	});
 });

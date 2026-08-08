@@ -388,7 +388,7 @@ describe("compact tool lifecycle", () => {
 		expect(sentMessages).toEqual(["Continue."]);
 	});
 
-	test("continues normally when Pi already compacted before the manual request", async () => {
+	test("does not continue when Pi already compacted before the tool request", async () => {
 		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
 		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
 		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -417,7 +417,7 @@ describe("compact tool lifecycle", () => {
 		expect(compactRequests).toHaveLength(1);
 		compactRequests[0].onError(new Error("Already compacted"));
 		await flushTimers();
-		expect(sentMessages).toEqual(["Continue."]);
+		expect(sentMessages).toEqual([]);
 	});
 
 	test("does not resume from session_compact until its own callback completes", async () => {
@@ -515,7 +515,7 @@ describe("compact tool lifecycle", () => {
 		await tool.execute("one", {}, undefined, undefined, context);
 		handlers.get("session_compact")?.({ type: "session_compact" }, context);
 		await flushTimers();
-		expect(sentMessages).toEqual(["Continue."]);
+		expect(sentMessages).toEqual([]);
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		await flushTimers();
 		expect(compactRequests).toHaveLength(0);
@@ -526,10 +526,10 @@ describe("compact tool lifecycle", () => {
 		expect(compactRequests).toHaveLength(1);
 		handlers.get("session_compact")?.({ type: "session_compact" }, context);
 		await flushTimers();
-		expect(sentMessages).toEqual(["Continue.", "Continue."]);
+		expect(sentMessages).toEqual([]);
 		compactRequests[0].onComplete();
 		await flushTimers();
-		expect(sentMessages).toEqual(["Continue.", "Continue."]);
+		expect(sentMessages).toEqual([]);
 	});
 
 	test("invalidates deferred callbacks when the session lifecycle resets", async () => {

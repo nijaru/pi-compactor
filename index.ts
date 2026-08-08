@@ -189,7 +189,9 @@ export default function (pi: ExtensionAPI) {
 		const onError = (error: Error) => {
 			if (pendingCompaction !== request) return;
 			if (/^already compacted$/i.test(error.message.trim())) {
-				finishCompaction(request, ctx, "Continue.");
+				// Pi already performed the compaction; only a successful compaction
+				// started by this tool gets the recovery prompt.
+				finishCompaction(request, ctx);
 				return;
 			}
 			console.error(`[pi-compactor] compaction failed: ${errorSummary(error)}`);
@@ -265,8 +267,9 @@ export default function (pi: ExtensionAPI) {
 		// An overflow compaction can start before a deferred manual request. Do not
 		// race it; Pi will retry the interrupted turn when willRetry is true.
 		if (event.reason === "overflow" && pendingCompaction) {
-			const request = pendingCompaction;
-			finishCompaction(request, ctx, event.willRetry ? undefined : "Continue.");
+			// Pi owns overflow recovery. It retries when willRetry is true; otherwise
+			// the normal run settles without a compactor continuation.
+			finishCompaction(pendingCompaction, ctx);
 		}
 
 		const selectors = readModelSelectors(pi, ctx);
@@ -332,7 +335,9 @@ export default function (pi: ExtensionAPI) {
 		// Pi still rejects new prompts. The callback is the completion boundary for
 		// our own request; a competing compaction has no such callback to wait for.
 		if (request && !request.owned) {
-			finishCompaction(request, ctx, event.reason === "overflow" && event.willRetry ? undefined : "Continue.");
+			// A competing /compact or Pi compaction owns this saved result. Do not
+			// emit the tool's recovery prompt for a compaction it did not start.
+			finishCompaction(request, ctx);
 		}
 	});
 	pi.on("agent_settled", (_event, ctx) => {

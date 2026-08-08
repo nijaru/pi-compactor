@@ -9,7 +9,6 @@ import {
 	isTransientError,
 	isUsableCompactionResult,
 	readModelSelectors,
-	shouldAutoCompact,
 	shouldInject,
 } from "./index";
 
@@ -42,13 +41,27 @@ describe("context hints", () => {
 		expect(shouldInject({ tokens: 65_000, percent: 50, contextWindow: 128_000 }, { tokens: 70_000, percent: 55 })).toBe(true);
 	});
 
-	test("requests automatic compaction at a settled boundary near 70%", () => {
-		expect(shouldAutoCompact({ tokens: 190_399, percent: 70, contextWindow: 272_000 })).toBe(false);
-		expect(shouldAutoCompact({ tokens: 190_400, percent: 70, contextWindow: 272_000 })).toBe(true);
-		expect(shouldAutoCompact({ tokens: null, percent: 70, contextWindow: 272_000 })).toBe(true);
-		expect(shouldAutoCompact({ tokens: null, percent: 69, contextWindow: 272_000 })).toBe(false);
-		expect(shouldAutoCompact({ tokens: 1_000, percent: 100, contextWindow: 0 })).toBe(false);
+	test("shows the percentage when the token count is unavailable", async () => {
+		const handlers = new Map<string, (...args: any[]) => any>();
+		const pi = {
+			getFlag: () => undefined,
+			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
+			registerFlag: () => undefined,
+			registerTool: () => undefined,
+		} as unknown as ExtensionAPI;
+		const { default: registerExtension } = await import("./index");
+		registerExtension(pi);
+
+		const event = { messages: [] as Array<{ content: string }> };
+		handlers.get("context")?.(event, {
+			getContextUsage: () => ({ tokens: null, percent: 64, contextWindow: 200_000 }),
+		} as unknown as ExtensionContext);
+
+		expect(event.messages).toEqual([
+			expect.objectContaining({ content: "[ctx ?/200k (64%)]" }),
+		]);
 	});
+
 });
 
 describe("model policy", () => {
@@ -407,40 +420,6 @@ describe("compact tool lifecycle", () => {
 		expect(sentMessages).toEqual(["Continue."]);
 	});
 
-	test("automatically compacts at a safe boundary and resumes after completion", async () => {
-		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
-		const handlers = new Map<string, (...args: any[]) => any>();
-		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
-		const sentMessages: string[] = [];
-		const pi = {
-			getFlag: () => undefined,
-			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
-			registerFlag: () => undefined,
-			registerTool: () => undefined,
-			sendUserMessage: (message: string) => sentMessages.push(message),
-		} as unknown as ExtensionAPI;
-
-		const { default: registerExtension } = await import("./index");
-		registerExtension(pi);
-		const context = {
-			isIdle: () => true,
-			getContextUsage: () => ({ tokens: 200_000, percent: 73, contextWindow: 272_000 }),
-			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
-		} as unknown as ExtensionContext;
-
-		const contextEvent = { messages: [] as unknown[] };
-		handlers.get("context")?.(contextEvent, context);
-		expect(contextEvent.messages).toHaveLength(1);
-		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
-		await flushTimers();
-		expect(compactRequests).toHaveLength(1);
-		expect(sentMessages).toEqual([]);
-
-		compactRequests[0].onComplete();
-		await flushTimers();
-		expect(sentMessages).toEqual(["Continue."]);
-	});
-
 	test("does not resume from session_compact until its own callback completes", async () => {
 		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
 		const handlers = new Map<string, (...args: any[]) => any>();
@@ -474,38 +453,6 @@ describe("compact tool lifecycle", () => {
 		expect(sentMessages).toEqual([]);
 
 		compactRequests[0].onComplete();
-		await flushTimers();
-		expect(sentMessages).toEqual(["Continue."]);
-	});
-
-	test("resumes after Pi threshold compaction only once the agent settles", async () => {
-		const handlers = new Map<string, (...args: any[]) => any>();
-		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
-		const sentMessages: string[] = [];
-		let idle = false;
-		const pi = {
-			getFlag: () => undefined,
-			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
-			registerFlag: () => undefined,
-			registerTool: () => undefined,
-			sendUserMessage: (message: string) => sentMessages.push(message),
-		} as unknown as ExtensionAPI;
-
-		const { default: registerExtension } = await import("./index");
-		registerExtension(pi);
-		const context = {
-			isIdle: () => idle,
-			hasPendingMessages: () => false,
-		} as unknown as ExtensionContext;
-
-		handlers.get("session_compact")?.({ reason: "threshold", willRetry: false }, context);
-		await flushTimers();
-		expect(sentMessages).toEqual([]);
-		idle = true;
-		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
-		await flushTimers();
-		expect(sentMessages).toEqual(["Continue."]);
-		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		await flushTimers();
 		expect(sentMessages).toEqual(["Continue."]);
 	});

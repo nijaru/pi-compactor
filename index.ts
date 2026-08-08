@@ -9,7 +9,6 @@ import {
 	isUsableCompactionResult,
 	readModelSelectors,
 	safeForLog,
-	shouldAutoCompact,
 	shouldInject,
 } from "./policy";
 
@@ -20,7 +19,6 @@ export {
 	isTransientError,
 	isUsableCompactionResult,
 	readModelSelectors,
-	shouldAutoCompact,
 	shouldInject,
 } from "./policy";
 export type { ContextUsageLike } from "./policy";
@@ -114,7 +112,6 @@ export default function (pi: ExtensionAPI) {
 	type PendingResume = { message: string };
 	let pendingCompaction: PendingCompaction | undefined;
 	let pendingResume: PendingResume | undefined;
-	let automaticCompactionPending = false;
 	let compactionTimer: ReturnType<typeof setTimeout> | undefined;
 	let resumeTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -135,7 +132,6 @@ export default function (pi: ExtensionAPI) {
 		// reference invalidates them without a separate generation counter.
 		pendingCompaction = undefined;
 		pendingResume = undefined;
-		automaticCompactionPending = false;
 		clearCompactionTimer();
 		clearResumeTimer();
 	}
@@ -221,20 +217,11 @@ export default function (pi: ExtensionAPI) {
 		}, 0);
 	}
 
-	function startAutomaticCompaction(ctx: ExtensionContext): void {
-		if (!automaticCompactionPending || pendingCompaction || pendingResume || !ctx.isIdle()) return;
-		automaticCompactionPending = false;
-		const request: PendingCompaction = { phase: "awaiting-settlement" };
-		pendingCompaction = request;
-		startCompaction(request, ctx);
-	}
-
 	// ── Context usage awareness ──────────────────────────────────────────
 	pi.on("context", (event, ctx) => {
 		const usage = ctx.getContextUsage();
 		if (!usage) return;
 		if (throttle.contextWindow !== undefined && throttle.contextWindow !== usage.contextWindow) resetThrottle();
-		if (!pendingCompaction && !pendingResume && shouldAutoCompact(usage)) automaticCompactionPending = true;
 		if (!shouldInject(usage, throttle)) return;
 
 		const percent = usage.percent ?? 0;
@@ -248,10 +235,13 @@ export default function (pi: ExtensionAPI) {
 		// Usage data only. Labels like "context growing" prime reflexive
 		// compaction; the number is the signal. [>200k] flags a cost tier.
 		const marker = tokens >= 200_000 ? " [>200k]" : "";
+		const usageLabel = usage.tokens !== null && Number.isFinite(usage.tokens)
+			? `${formatTokens(tokens)}/${formatTokens(window)}`
+			: `?/${formatTokens(window)}${usage.percent !== null && Number.isFinite(percent) ? ` (${Math.round(percent)}%)` : ""}`;
 
 		event.messages.push({
 			role: "user",
-			content: `[ctx ${formatTokens(tokens)}/${formatTokens(window)}]${marker}`,
+			content: `[ctx ${usageLabel}]${marker}`,
 			timestamp: Date.now(),
 		});
 	});
@@ -271,10 +261,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		// Pi's threshold compaction wins if it starts before our settled-boundary
 		// request. It already owns overflow recovery and any queued continuation.
-		if (event.reason === "threshold") {
-			automaticCompactionPending = false;
-			if (pendingCompaction) return { cancel: true };
-		}
+		if (event.reason === "threshold" && pendingCompaction) return { cancel: true };
 		// An overflow compaction can start before a deferred manual request. Do not
 		// race it; Pi will retry the interrupted turn when willRetry is true.
 		if (event.reason === "overflow" && pendingCompaction) {
@@ -346,13 +333,6 @@ export default function (pi: ExtensionAPI) {
 		// our own request; a competing compaction has no such callback to wait for.
 		if (request && !request.owned) {
 			finishCompaction(request, ctx, event.reason === "overflow" && event.willRetry ? undefined : "Continue.");
-			return;
-		}
-		if (event.reason === "overflow") return;
-		// Pi's threshold compaction has no completion callback exposed to
-		// extensions. Defer its Codex-like continuation until agent_settled.
-		if (event.reason === "threshold" && !event.willRetry && !ctx.hasPendingMessages()) {
-			queueResume("Continue.", ctx);
 		}
 	});
 	pi.on("agent_settled", (_event, ctx) => {
@@ -361,7 +341,6 @@ export default function (pi: ExtensionAPI) {
 		// accounting. agent_settled is the first lifecycle event that guarantees no
 		// retry or follow-up remains.
 		if (pendingCompaction?.phase === "awaiting-settlement") scheduleCompaction(ctx);
-		else startAutomaticCompaction(ctx);
 		if (pendingResume) schedulePendingResume(ctx);
 	});
 	pi.on("session_start", () => {
@@ -372,10 +351,7 @@ export default function (pi: ExtensionAPI) {
 		resetThrottle();
 		resetLifecycle();
 	});
-	pi.on("model_select", () => {
-		resetThrottle();
-		automaticCompactionPending = false;
-	});
+	pi.on("model_select", resetThrottle);
 	pi.on("session_shutdown", () => {
 		resetThrottle();
 		resetLifecycle();
@@ -412,7 +388,6 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			automaticCompactionPending = false;
 			pendingCompaction = {
 				instructions: params.instructions,
 				phase: "awaiting-settlement",

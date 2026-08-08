@@ -14,11 +14,6 @@ const MAX_POLICY_BYTES = 64 * 1024;
 const MAX_MODEL_SELECTORS = 8;
 const MAX_SELECTOR_LENGTH = 512;
 
-// Start compaction before Pi's hard reserve is reached, but only at a settled
-// agent boundary. This leaves room for a long response without interrupting
-// tools or racing provider requests.
-const AUTO_COMPACT_RATIO = 0.7;
-
 // ── Context hint thresholds ─────────────────────────────────────────────
 // ≤128k: 50% (hardware-constrained windows, model handles full context fine)
 // >128k: 128k tokens (quality degradation zone, proactive before 200k price cliff)
@@ -38,18 +33,6 @@ export interface ContextUsageLike {
 	tokens: number | null;
 	percent: number | null;
 	contextWindow: number;
-}
-
-/**
- * Mark automatic compaction once usage reaches the source-level safety ratio.
- * The caller starts it only after agent_settled, never during active tools.
- */
-export function shouldAutoCompact(usage: ContextUsageLike): boolean {
-	if (!Number.isFinite(usage.contextWindow) || usage.contextWindow <= 0) return false;
-	if (usage.tokens !== null && Number.isFinite(usage.tokens)) {
-		return usage.tokens >= usage.contextWindow * AUTO_COMPACT_RATIO;
-	}
-	return usage.percent !== null && Number.isFinite(usage.percent) && usage.percent >= AUTO_COMPACT_RATIO * 100;
 }
 
 /**

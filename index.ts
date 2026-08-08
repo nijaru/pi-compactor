@@ -9,10 +9,20 @@ import {
 	isUsableCompactionResult,
 	readModelSelectors,
 	safeForLog,
+	shouldAutoCompact,
 	shouldInject,
 } from "./policy";
 
-export { errorSummary, formatTokens, hintPercent, isTransientError, isUsableCompactionResult, readModelSelectors, shouldInject } from "./policy";
+export {
+	errorSummary,
+	formatTokens,
+	hintPercent,
+	isTransientError,
+	isUsableCompactionResult,
+	readModelSelectors,
+	shouldAutoCompact,
+	shouldInject,
+} from "./policy";
 export type { ContextUsageLike } from "./policy";
 
 const MAX_ATTEMPTS = 2;
@@ -99,10 +109,12 @@ export default function (pi: ExtensionAPI) {
 	type PendingCompaction = {
 		instructions?: string;
 		phase: "awaiting-settlement" | "compacting";
+		owned?: boolean;
 	};
 	type PendingResume = { message: string };
 	let pendingCompaction: PendingCompaction | undefined;
 	let pendingResume: PendingResume | undefined;
+	let automaticCompactionPending = false;
 	let compactionTimer: ReturnType<typeof setTimeout> | undefined;
 	let resumeTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -123,6 +135,7 @@ export default function (pi: ExtensionAPI) {
 		// reference invalidates them without a separate generation counter.
 		pendingCompaction = undefined;
 		pendingResume = undefined;
+		automaticCompactionPending = false;
 		clearCompactionTimer();
 		clearResumeTimer();
 	}
@@ -173,35 +186,47 @@ export default function (pi: ExtensionAPI) {
 		if (resumeMessage) queueResume(resumeMessage, ctx);
 	}
 
+	function startCompaction(request: PendingCompaction, ctx: ExtensionContext): void {
+		if (pendingCompaction !== request || request.phase !== "awaiting-settlement") return;
+		request.phase = "compacting";
+		const onComplete = () => finishCompaction(request, ctx, "Continue.");
+		const onError = (error: Error) => {
+			if (pendingCompaction !== request) return;
+			if (/^already compacted$/i.test(error.message.trim())) {
+				finishCompaction(request, ctx, "Continue.");
+				return;
+			}
+			console.error(`[pi-compactor] compaction failed: ${errorSummary(error)}`);
+			if (error.name === "AbortError" || /cancelled/i.test(error.message)) {
+				finishCompaction(request, ctx);
+				return;
+			}
+			finishCompaction(request, ctx, `Compaction failed (${errorSummary(error)}). Continue without compaction.`);
+		};
+
+		try {
+			ctx.compact({ customInstructions: request.instructions, onComplete, onError });
+		} catch (error) {
+			onError(error instanceof Error ? error : new Error(String(error)));
+		}
+	}
+
 	function scheduleCompaction(ctx: ExtensionContext): void {
 		const request = pendingCompaction;
 		if (!request || request.phase !== "awaiting-settlement" || compactionTimer !== undefined) return;
 		compactionTimer = setTimeout(() => {
 			compactionTimer = undefined;
 			if (pendingCompaction !== request || request.phase !== "awaiting-settlement" || !ctx.isIdle()) return;
-
-			request.phase = "compacting";
-			const onComplete = () => finishCompaction(request, ctx, "Continue.");
-			const onError = (error: Error) => {
-				if (pendingCompaction !== request) return;
-				if (/^already compacted$/i.test(error.message.trim())) {
-					finishCompaction(request, ctx, "Continue.");
-					return;
-				}
-				console.error(`[pi-compactor] compaction failed: ${errorSummary(error)}`);
-				if (error.name === "AbortError" || /cancelled/i.test(error.message)) {
-					finishCompaction(request, ctx);
-					return;
-				}
-				finishCompaction(request, ctx, `Compaction failed (${errorSummary(error)}). Continue without compaction.`);
-			};
-
-			try {
-				ctx.compact({ customInstructions: request.instructions, onComplete, onError });
-			} catch (error) {
-				onError(error instanceof Error ? error : new Error(String(error)));
-			}
+			startCompaction(request, ctx);
 		}, 0);
+	}
+
+	function startAutomaticCompaction(ctx: ExtensionContext): void {
+		if (!automaticCompactionPending || pendingCompaction || pendingResume || !ctx.isIdle()) return;
+		automaticCompactionPending = false;
+		const request: PendingCompaction = { phase: "awaiting-settlement" };
+		pendingCompaction = request;
+		startCompaction(request, ctx);
 	}
 
 	// ── Context usage awareness ──────────────────────────────────────────
@@ -209,6 +234,7 @@ export default function (pi: ExtensionAPI) {
 		const usage = ctx.getContextUsage();
 		if (!usage) return;
 		if (throttle.contextWindow !== undefined && throttle.contextWindow !== usage.contextWindow) resetThrottle();
+		if (!pendingCompaction && !pendingResume && shouldAutoCompact(usage)) automaticCompactionPending = true;
 		if (!shouldInject(usage, throttle)) return;
 
 		const percent = usage.percent ?? 0;
@@ -237,11 +263,24 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
-		// A deferred manual compaction starts only after Pi reports the terminating
-		// agent run settled, which is later than tool-result persistence. Pi may
-		// independently notice the same high context usage in the meantime; let the
-		// explicit request own threshold compaction instead of racing it.
-		if (event.reason === "threshold" && pendingCompaction) return { cancel: true };
+		// Mark the compaction started by our ctx.compact call. session_compact is
+		// also emitted for competing requests, and only those may reconcile the
+		// pending request before its own completion callback.
+		if (event.reason === "manual" && pendingCompaction?.phase === "compacting") {
+			pendingCompaction.owned = true;
+		}
+		// Pi's threshold compaction wins if it starts before our settled-boundary
+		// request. It already owns overflow recovery and any queued continuation.
+		if (event.reason === "threshold") {
+			automaticCompactionPending = false;
+			if (pendingCompaction) return { cancel: true };
+		}
+		// An overflow compaction can start before a deferred manual request. Do not
+		// race it; Pi will retry the interrupted turn when willRetry is true.
+		if (event.reason === "overflow" && pendingCompaction) {
+			const request = pendingCompaction;
+			finishCompaction(request, ctx, event.willRetry ? undefined : "Continue.");
+		}
 
 		const selectors = readModelSelectors(pi, ctx);
 
@@ -299,10 +338,22 @@ export default function (pi: ExtensionAPI) {
 	// A saved compaction is authoritative even when another extension or /compact
 	// won the race. Reconcile it before ctx.compact's callback so an abandoned
 	// callback cannot leave the tool permanently in flight or resume twice.
-	pi.on("session_compact", (_event, ctx) => {
+	pi.on("session_compact", (event, ctx) => {
 		resetThrottle();
 		const request = pendingCompaction;
-		if (request) finishCompaction(request, ctx, "Continue.");
+		// ctx.compact emits session_compact before its completion callback and while
+		// Pi still rejects new prompts. The callback is the completion boundary for
+		// our own request; a competing compaction has no such callback to wait for.
+		if (request && !request.owned) {
+			finishCompaction(request, ctx, event.reason === "overflow" && event.willRetry ? undefined : "Continue.");
+			return;
+		}
+		if (event.reason === "overflow") return;
+		// Pi's threshold compaction has no completion callback exposed to
+		// extensions. Defer its Codex-like continuation until agent_settled.
+		if (event.reason === "threshold" && !event.willRetry && !ctx.hasPendingMessages()) {
+			queueResume("Continue.", ctx);
+		}
 	});
 	pi.on("agent_settled", (_event, ctx) => {
 		// ctx.compact aborts an active operation. Starting it from the compact tool
@@ -310,6 +361,7 @@ export default function (pi: ExtensionAPI) {
 		// accounting. agent_settled is the first lifecycle event that guarantees no
 		// retry or follow-up remains.
 		if (pendingCompaction?.phase === "awaiting-settlement") scheduleCompaction(ctx);
+		else startAutomaticCompaction(ctx);
 		if (pendingResume) schedulePendingResume(ctx);
 	});
 	pi.on("session_start", () => {
@@ -320,7 +372,10 @@ export default function (pi: ExtensionAPI) {
 		resetThrottle();
 		resetLifecycle();
 	});
-	pi.on("model_select", resetThrottle);
+	pi.on("model_select", () => {
+		resetThrottle();
+		automaticCompactionPending = false;
+	});
 	pi.on("session_shutdown", () => {
 		resetThrottle();
 		resetLifecycle();
@@ -357,6 +412,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
+			automaticCompactionPending = false;
 			pendingCompaction = {
 				instructions: params.instructions,
 				phase: "awaiting-settlement",

@@ -27,6 +27,10 @@ const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 1_000;
 const MAX_RESUME_ATTEMPTS = 2;
 const RESUME_ACK_TIMEOUT_MS = 5_000;
+const RESUME_CUSTOM_TYPE = "pi-compactor-resume";
+const RESUME_MESSAGE = "Resume only unfinished work; if none remains, give the final response and stop.";
+const RESUME_AFTER_FAILURE_MESSAGE =
+	"Compaction failed; resume only unfinished work without compaction, then give the final response.";
 
 type CompactionModel = Parameters<typeof compact>[1];
 type ResolvedModel = {
@@ -108,6 +112,7 @@ export default function (pi: ExtensionAPI) {
 	};
 	type PendingCompaction = {
 		instructions?: string;
+		continueAfterCompaction: boolean;
 		phase: "awaiting-settlement" | "compacting";
 		owned?: boolean;
 	};
@@ -115,7 +120,6 @@ export default function (pi: ExtensionAPI) {
 	let pendingCompaction: PendingCompaction | undefined;
 	let pendingResume: PendingResume | undefined;
 	let activeResume: PendingResume | undefined;
-	let resumeInputSeen = false;
 	let resumeAckTimer: ReturnType<typeof setTimeout> | undefined;
 	let compactionTimer: ReturnType<typeof setTimeout> | undefined;
 	let resumeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -144,7 +148,6 @@ export default function (pi: ExtensionAPI) {
 		pendingCompaction = undefined;
 		pendingResume = undefined;
 		activeResume = undefined;
-		resumeInputSeen = false;
 		clearResumeAckTimer();
 		clearCompactionTimer();
 		clearResumeTimer();
@@ -170,10 +173,19 @@ export default function (pi: ExtensionAPI) {
 		pending.attempts += 1;
 		activeResume = pending;
 		try {
-			// The current pi.sendUserMessage API is fire-and-forget and returns void.
-			// A future awaitable implementation, and test doubles, may return a
-			// promise; handle both without treating void as successful delivery.
-			const dispatch = (pi.sendUserMessage as unknown as (message: string) => unknown)(pending.message);
+			// Keep the recovery instruction out of the visible user transcript while
+			// still putting it in model context and starting a new turn.
+			const dispatch = (pi.sendMessage as unknown as (
+				message: { customType: string; content: string; display: boolean },
+				options: { triggerTurn: boolean },
+			) => unknown)(
+				{
+					customType: RESUME_CUSTOM_TYPE,
+					content: pending.message,
+					display: false,
+				},
+				{ triggerTurn: true },
+			);
 			if (dispatch !== undefined) {
 				if (dispatch && typeof (dispatch as PromiseLike<unknown>).then === "function") {
 					void Promise.resolve(dispatch).then(
@@ -185,9 +197,8 @@ export default function (pi: ExtensionAPI) {
 				}
 				return;
 			}
-			// Pi has no acknowledgement for a void dispatch. The next prompt's
-			// before_agent_start event is the delivery acknowledgement; if it never
-			// arrives, retry after a bounded delay.
+			// Pi has no acknowledgement for a void dispatch. The next agent_start
+			// event confirms delivery; retry after a bounded delay if it never arrives.
 			resumeAckTimer = setTimeout(() => {
 				resumeAckTimer = undefined;
 				failResume(pending, ctx, new Error("prompt dispatch was not acknowledged"));
@@ -238,13 +249,14 @@ export default function (pi: ExtensionAPI) {
 	function startCompaction(request: PendingCompaction, ctx: ExtensionContext): void {
 		if (pendingCompaction !== request || request.phase !== "awaiting-settlement") return;
 		request.phase = "compacting";
-		const onComplete = () => finishCompaction(request, ctx, "Continue.");
+		const onComplete = () =>
+			finishCompaction(request, ctx, request.continueAfterCompaction ? RESUME_MESSAGE : undefined);
 		const onError = (error: Error) => {
 			if (pendingCompaction !== request) return;
 			if (/^already compacted$/i.test(error.message.trim())) {
-				// Pi already performed the compaction; only a successful compaction
-				// started by this tool gets the recovery prompt.
-				finishCompaction(request, ctx);
+				// Pi already performed the compaction; resume only when the tool call
+				// explicitly said unfinished work remains.
+				finishCompaction(request, ctx, request.continueAfterCompaction ? RESUME_MESSAGE : undefined);
 				return;
 			}
 			console.error(`[pi-compactor] compaction failed: ${errorSummary(error)}`);
@@ -252,7 +264,11 @@ export default function (pi: ExtensionAPI) {
 				finishCompaction(request, ctx);
 				return;
 			}
-			finishCompaction(request, ctx, `Compaction failed (${errorSummary(error)}). Continue without compaction.`);
+			finishCompaction(
+				request,
+				ctx,
+				request.continueAfterCompaction ? RESUME_AFTER_FAILURE_MESSAGE : undefined,
+			);
 		};
 
 		try {
@@ -272,17 +288,9 @@ export default function (pi: ExtensionAPI) {
 		}, 0);
 	}
 
-	pi.on("input", (event) => {
+	pi.on("agent_start", () => {
 		const pending = activeResume;
-		// While a resume is active, the next extension-originated input is the
-		// fire-and-forget dispatch. Use its source rather than text because later
-		// input handlers may transform the prompt before before_agent_start.
-		resumeInputSeen = pending !== undefined && event.source === "extension";
-	});
-	pi.on("before_agent_start", (event) => {
-		const pending = activeResume;
-		if (pending && (resumeInputSeen || event.prompt === pending.message)) acknowledgeResume(pending);
-		resumeInputSeen = false;
+		if (pending) acknowledgeResume(pending);
 	});
 
 	// ── Context usage awareness ──────────────────────────────────────────
@@ -443,11 +451,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "compact",
 		label: "Compact",
-		description: "Trigger context compaction.",
+		description: "Trigger context compaction and choose whether a follow-up turn should run afterward.",
 		promptSnippet: "Compact context yourself at task boundaries",
 		promptGuidelines: [
 			"DEFER mid-task: If you have a clear next step in the current work — a file to write, a change to verify, a bug to finish fixing — do NOT compact. A [ctx] hint is informational, not a trigger. Keep working.",
 			"Compact at genuine boundaries: the task is complete and verified, or you're switching to unrelated work. If no [ctx] hint has fired, you have room; don't bother.",
+			"Set continueAfterCompaction=true when unfinished work remains or a final response is still needed; set it false only when no follow-up turn should occur.",
 			"No user permission needed; this is your context management tool.",
 			"Include instructions for what to preserve: current task, changed files, decisions, blockers, and next command.",
 			"After compacting, re-read active files before continuing.",
@@ -459,6 +468,9 @@ export default function (pi: ExtensionAPI) {
 						"What to preserve in the summary (e.g., 'current task, changed files, decisions, blockers, next command')",
 				}),
 			),
+			continueAfterCompaction: Type.Boolean({
+				description: "Set true when unfinished work remains or a final response is needed; false only when no follow-up turn should occur.",
+			}),
 		}),
 		executionMode: "sequential",
 		async execute(_toolCallId, params) {
@@ -472,11 +484,17 @@ export default function (pi: ExtensionAPI) {
 
 			pendingCompaction = {
 				instructions: params.instructions,
+				continueAfterCompaction: params.continueAfterCompaction,
 				phase: "awaiting-settlement",
 			};
 
 			return {
-				content: [{ type: "text", text: "Compaction started. The result will be reported when it finishes." }],
+				content: [{
+					type: "text",
+					text: params.continueAfterCompaction
+						? "Compaction scheduled; unfinished work will resume after it finishes."
+						: "Compaction scheduled; no follow-up turn will be started.",
+				}],
 				details: {},
 				terminate: true,
 			};

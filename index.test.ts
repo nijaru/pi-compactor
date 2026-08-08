@@ -249,7 +249,7 @@ describe("compact tool lifecycle", () => {
 			registerTool: (definition: unknown) => {
 				tool = definition;
 			},
-			sendUserMessage: (message: string) => sentMessages.push(message),
+			sendMessage: (message: any) => (sentMessages.push(typeof message === "string" ? message : message.content), Promise.resolve()),
 		} as unknown as ExtensionAPI;
 
 		const { default: registerExtension } = await import("./index");
@@ -260,8 +260,8 @@ describe("compact tool lifecycle", () => {
 			isIdle: () => true,
 			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
 		} as unknown as ExtensionContext;
-		const first = await tool.execute("one", {}, undefined, undefined, context);
-		const second = await tool.execute("two", {}, undefined, undefined, context);
+		const first = await tool.execute("one", { continueAfterCompaction: true }, undefined, undefined, context);
+		const second = await tool.execute("two", { continueAfterCompaction: true }, undefined, undefined, context);
 		expect(first.isError).toBeUndefined();
 		expect(first.terminate).toBe(true);
 		expect(second.isError).toBe(true);
@@ -276,8 +276,8 @@ describe("compact tool lifecycle", () => {
 		await flushTimers();
 		compactRequests[0].onComplete();
 		await flushTimers();
-		expect(sentMessages).toEqual(["Continue."]);
-		const third = await tool.execute("three", {}, undefined, undefined, context);
+		expect(sentMessages).toEqual(["Resume only unfinished work; if none remains, give the final response and stop."]);
+		const third = await tool.execute("three", { continueAfterCompaction: true }, undefined, undefined, context);
 		expect(third.isError).toBeUndefined();
 		expect(compactRequests).toHaveLength(1);
 		await flushTimers();
@@ -291,19 +291,54 @@ describe("compact tool lifecycle", () => {
 		compactRequests[1].onError(new Error("provider failed"));
 		console.error = originalConsoleError;
 		await flushTimers();
-		const fourth = await tool.execute("four", {}, undefined, undefined, context);
+		const fourth = await tool.execute("four", { continueAfterCompaction: true }, undefined, undefined, context);
 		expect(fourth.isError).toBeUndefined();
 		expect(compactRequests).toHaveLength(2);
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		await flushTimers();
 		expect(compactRequests).toHaveLength(3);
-		expect(sentMessages).toEqual(["Continue.", "Compaction failed (provider failed). Continue without compaction."]);
+		expect(sentMessages).toEqual([
+			"Resume only unfinished work; if none remains, give the final response and stop.",
+			"Compaction failed; resume only unfinished work without compaction, then give the final response.",
+		]);
 	});
+	test("does not start a follow-up when no unfinished work remains", async () => {
+		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
+		const handlers = new Map<string, (...args: any[]) => any>();
+		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
+		const sentMessages: string[] = [];
+		let tool: any;
+		const pi = {
+			getFlag: () => undefined,
+			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
+			registerFlag: () => undefined,
+			registerTool: (definition: unknown) => {
+				tool = definition;
+			},
+			sendMessage: (message: any) => (sentMessages.push(message.content), Promise.resolve()),
+		} as unknown as ExtensionAPI;
+
+		const { default: registerExtension } = await import("./index");
+		registerExtension(pi);
+		const context = {
+			isIdle: () => true,
+			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
+		} as unknown as ExtensionContext;
+
+		const result = await tool.execute("one", { continueAfterCompaction: false }, undefined, undefined, context);
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
+		await flushTimers();
+		compactRequests[0].onComplete();
+		await flushTimers();
+		expect(result.content[0].text).toContain("no follow-up turn");
+		expect(sentMessages).toEqual([]);
+	});
+
 	test("waits for the agent to settle before sending the recovery prompt", async () => {
 		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
 		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
 		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
-		const sentMessages: Array<[string, unknown?]> = [];
+		const sentMessages: Array<[string, unknown?, boolean?]> = [];
 		let idle = false;
 		let tool: any;
 		const pi = {
@@ -313,7 +348,7 @@ describe("compact tool lifecycle", () => {
 			registerTool: (definition: unknown) => {
 				tool = definition;
 			},
-			sendUserMessage: (message: string, options?: unknown) => sentMessages.push([message, options]),
+			sendMessage: (message: any, options?: unknown) => (sentMessages.push([message.content, options, message.display]), Promise.resolve()),
 		} as unknown as ExtensionAPI;
 
 		const { default: registerExtension } = await import("./index");
@@ -323,7 +358,7 @@ describe("compact tool lifecycle", () => {
 			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
 		} as unknown as ExtensionContext;
 
-		await tool.execute("one", {}, undefined, undefined, context);
+		await tool.execute("one", { continueAfterCompaction: true }, undefined, undefined, context);
 		await flushTimers();
 		expect(compactRequests).toHaveLength(0);
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
@@ -337,13 +372,13 @@ describe("compact tool lifecycle", () => {
 		compactRequests[0].onComplete();
 		await flushTimers();
 		expect(sentMessages).toEqual([]);
-		const duplicate = await tool.execute("two", {}, undefined, undefined, context);
+		const duplicate = await tool.execute("two", { continueAfterCompaction: true }, undefined, undefined, context);
 		expect(duplicate.isError).toBe(true);
 
 		idle = true;
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		await flushTimers();
-		expect(sentMessages).toEqual([["Continue.", undefined]]);
+		expect(sentMessages).toEqual([["Resume only unfinished work; if none remains, give the final response and stop.", { triggerTurn: true }, false]]);
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		await flushTimers();
 		expect(sentMessages).toHaveLength(1);
@@ -362,7 +397,7 @@ describe("compact tool lifecycle", () => {
 			registerTool: (definition: unknown) => {
 				tool = definition;
 			},
-			sendUserMessage: (message: string) => sentMessages.push(message),
+			sendMessage: (message: any) => (sentMessages.push(typeof message === "string" ? message : message.content), Promise.resolve()),
 		} as unknown as ExtensionAPI;
 
 		const { default: registerExtension } = await import("./index");
@@ -372,7 +407,7 @@ describe("compact tool lifecycle", () => {
 			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
 		} as unknown as ExtensionContext;
 
-		const result = await tool.execute("one", {}, undefined, undefined, context);
+		const result = await tool.execute("one", { continueAfterCompaction: true }, undefined, undefined, context);
 		const beforeCompact = handlers.get("session_before_compact");
 		expect(beforeCompact).toBeDefined();
 		expect(await beforeCompact!({ reason: "threshold" }, context)).toBeUndefined();
@@ -385,7 +420,7 @@ describe("compact tool lifecycle", () => {
 		expect(sentMessages).toEqual([]);
 	});
 
-	test("does not continue when Pi already compacted before the tool request", async () => {
+	test("resumes when Pi reports the compaction was already complete", async () => {
 		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
 		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();
 		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -398,7 +433,7 @@ describe("compact tool lifecycle", () => {
 			registerTool: (definition: unknown) => {
 				tool = definition;
 			},
-			sendUserMessage: (message: string) => sentMessages.push(message),
+			sendMessage: (message: any) => (sentMessages.push(typeof message === "string" ? message : message.content), Promise.resolve()),
 		} as unknown as ExtensionAPI;
 
 		const { default: registerExtension } = await import("./index");
@@ -408,13 +443,13 @@ describe("compact tool lifecycle", () => {
 			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
 		} as unknown as ExtensionContext;
 
-		await tool.execute("one", {}, undefined, undefined, context);
+		await tool.execute("one", { continueAfterCompaction: true }, undefined, undefined, context);
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		await flushTimers();
 		expect(compactRequests).toHaveLength(1);
 		compactRequests[0].onError(new Error("Already compacted"));
 		await flushTimers();
-		expect(sentMessages).toEqual([]);
+		expect(sentMessages).toEqual(["Resume only unfinished work; if none remains, give the final response and stop."]);
 	});
 
 	test("does not resume from session_compact until its own callback completes", async () => {
@@ -430,7 +465,7 @@ describe("compact tool lifecycle", () => {
 			registerTool: (definition: unknown) => {
 				tool = definition;
 			},
-			sendUserMessage: (message: string) => sentMessages.push(message),
+			sendMessage: (message: any) => (sentMessages.push(typeof message === "string" ? message : message.content), Promise.resolve()),
 		} as unknown as ExtensionAPI;
 
 		const { default: registerExtension } = await import("./index");
@@ -440,7 +475,7 @@ describe("compact tool lifecycle", () => {
 			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
 		} as unknown as ExtensionContext;
 
-		await tool.execute("one", {}, undefined, undefined, context);
+		await tool.execute("one", { continueAfterCompaction: true }, undefined, undefined, context);
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		await flushTimers();
 		expect(compactRequests).toHaveLength(1);
@@ -453,7 +488,7 @@ describe("compact tool lifecycle", () => {
 
 		compactRequests[0].onComplete();
 		await flushTimers();
-		expect(sentMessages).toEqual(["Continue."]);
+		expect(sentMessages).toEqual(["Resume only unfinished work; if none remains, give the final response and stop."]);
 	});
 
 	test("retries a failed recovery prompt without losing it", async () => {
@@ -470,10 +505,11 @@ describe("compact tool lifecycle", () => {
 			registerTool: (definition: unknown) => {
 				tool = definition;
 			},
-			sendUserMessage: (message: string) => {
+			sendMessage: (message: any) => {
 				sendAttempts += 1;
 				if (sendAttempts === 1) return Promise.reject(new Error("session not ready"));
-				sentMessages.push(message);
+				sentMessages.push(message.content);
+				return Promise.resolve();
 			},
 		} as unknown as ExtensionAPI;
 
@@ -484,7 +520,7 @@ describe("compact tool lifecycle", () => {
 			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
 		} as unknown as ExtensionContext;
 
-		await tool.execute("one", {}, undefined, undefined, context);
+		await tool.execute("one", { continueAfterCompaction: true }, undefined, undefined, context);
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		await flushTimers();
 		expect(compactRequests).toHaveLength(1);
@@ -499,10 +535,9 @@ describe("compact tool lifecycle", () => {
 			console.error = originalConsoleError;
 		}
 		expect(sendAttempts).toBe(2);
-		expect(sentMessages).toEqual(["Continue."]);
-		handlers.get("input")?.({ source: "extension", text: "Continue." }, context);
-		handlers.get("before_agent_start")?.({ prompt: "transformed Continue." }, context);
-		await flushTimers();
+		expect(sentMessages).toEqual([
+			"Resume only unfinished work; if none remains, give the final response and stop.",
+		]);
 	});
 
 	test("does not add a duplicate continuation to Pi's overflow retry", async () => {
@@ -518,7 +553,7 @@ describe("compact tool lifecycle", () => {
 			registerTool: (definition: unknown) => {
 				tool = definition;
 			},
-			sendUserMessage: (message: string) => sentMessages.push(message),
+			sendMessage: (message: any) => (sentMessages.push(typeof message === "string" ? message : message.content), Promise.resolve()),
 		} as unknown as ExtensionAPI;
 
 		const { default: registerExtension } = await import("./index");
@@ -528,7 +563,7 @@ describe("compact tool lifecycle", () => {
 			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
 		} as unknown as ExtensionContext;
 
-		await tool.execute("one", {}, undefined, undefined, context);
+		await tool.execute("one", { continueAfterCompaction: true }, undefined, undefined, context);
 		handlers.get("session_before_compact")?.({ reason: "overflow", willRetry: true }, context);
 		handlers.get("session_compact")?.({ reason: "overflow", willRetry: true }, context);
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
@@ -550,7 +585,7 @@ describe("compact tool lifecycle", () => {
 			registerTool: (definition: unknown) => {
 				tool = definition;
 			},
-			sendUserMessage: (message: string) => sentMessages.push(message),
+			sendMessage: (message: any) => (sentMessages.push(typeof message === "string" ? message : message.content), Promise.resolve()),
 		} as unknown as ExtensionAPI;
 
 		const { default: registerExtension } = await import("./index");
@@ -560,7 +595,7 @@ describe("compact tool lifecycle", () => {
 			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
 		} as unknown as ExtensionContext;
 
-		await tool.execute("one", {}, undefined, undefined, context);
+		await tool.execute("one", { continueAfterCompaction: true }, undefined, undefined, context);
 		handlers.get("session_compact")?.({ type: "session_compact" }, context);
 		await flushTimers();
 		expect(sentMessages).toEqual([]);
@@ -568,7 +603,7 @@ describe("compact tool lifecycle", () => {
 		await flushTimers();
 		expect(compactRequests).toHaveLength(0);
 
-		await tool.execute("two", {}, undefined, undefined, context);
+		await tool.execute("two", { continueAfterCompaction: true }, undefined, undefined, context);
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		await flushTimers();
 		expect(compactRequests).toHaveLength(1);
@@ -593,7 +628,7 @@ describe("compact tool lifecycle", () => {
 			registerTool: (definition: unknown) => {
 				tool = definition;
 			},
-			sendUserMessage: (message: string) => sentMessages.push(message),
+			sendMessage: (message: any) => (sentMessages.push(typeof message === "string" ? message : message.content), Promise.resolve()),
 		} as unknown as ExtensionAPI;
 
 		const { default: registerExtension } = await import("./index");
@@ -603,13 +638,13 @@ describe("compact tool lifecycle", () => {
 			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
 		} as unknown as ExtensionContext;
 
-		await tool.execute("one", {}, undefined, undefined, context);
+		await tool.execute("one", { continueAfterCompaction: true }, undefined, undefined, context);
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		handlers.get("session_start")?.({ type: "session_start" }, context);
 		await flushTimers();
 		expect(compactRequests).toHaveLength(0);
 
-		await tool.execute("two", {}, undefined, undefined, context);
+		await tool.execute("two", { continueAfterCompaction: true }, undefined, undefined, context);
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		await flushTimers();
 		expect(compactRequests).toHaveLength(1);

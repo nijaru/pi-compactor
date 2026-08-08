@@ -11,8 +11,8 @@ pi install git:github.com/nijaru/pi-compactor
 ## How it works
 
 1. As context fills, pi-compactor injects a small usage hint such as `[ctx 128k/1m]`.
-2. The model calls the `compact` tool at a genuine task boundary, with optional preservation instructions.
-3. Pi reloads the session with the summary; after the active run settles, the extension sends `Continue.` as a new prompt so the recovery message cannot be stranded in an aborted follow-up queue.
+2. The model calls the `compact` tool at a genuine task boundary, with optional preservation instructions and an explicit `continueAfterCompaction` choice.
+3. Pi reloads the session with the summary. If unfinished work remains or a final response is needed, the extension starts one hidden recovery turn after the active run settles; otherwise it stops without creating extra work.
 
 The first hint is at 50% for context windows up to 128k, or about 128k tokens for larger windows. Later hints are throttled by both percentage and token deltas. A `[>200k]` marker indicates that the context has crossed the higher-cost range; it does not trigger compaction. Pi's own automatic threshold is controlled by `compaction.reserveTokens` in Pi's `settings.json`; this extension does not add another threshold.
 

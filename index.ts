@@ -25,6 +25,8 @@ export type { ContextUsageLike } from "./policy";
 
 const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 1_000;
+const MAX_RESUME_ATTEMPTS = 2;
+const RESUME_ACK_TIMEOUT_MS = 5_000;
 
 type CompactionModel = Parameters<typeof compact>[1];
 type ResolvedModel = {
@@ -109,9 +111,12 @@ export default function (pi: ExtensionAPI) {
 		phase: "awaiting-settlement" | "compacting";
 		owned?: boolean;
 	};
-	type PendingResume = { message: string };
+	type PendingResume = { message: string; attempts: number };
 	let pendingCompaction: PendingCompaction | undefined;
 	let pendingResume: PendingResume | undefined;
+	let activeResume: PendingResume | undefined;
+	let resumeInputSeen = false;
+	let resumeAckTimer: ReturnType<typeof setTimeout> | undefined;
 	let compactionTimer: ReturnType<typeof setTimeout> | undefined;
 	let resumeTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -127,22 +132,68 @@ export default function (pi: ExtensionAPI) {
 		resumeTimer = undefined;
 	}
 
+	function clearResumeAckTimer(): void {
+		if (resumeAckTimer === undefined) return;
+		clearTimeout(resumeAckTimer);
+		resumeAckTimer = undefined;
+	}
+
 	function resetLifecycle(): void {
 		// Timer and callback closures retain their request object. Clearing the
 		// reference invalidates them without a separate generation counter.
 		pendingCompaction = undefined;
 		pendingResume = undefined;
+		activeResume = undefined;
+		resumeInputSeen = false;
+		clearResumeAckTimer();
 		clearCompactionTimer();
 		clearResumeTimer();
 	}
 
-	function sendResume(message: string): void {
+	function acknowledgeResume(pending: PendingResume): void {
+		if (activeResume !== pending) return;
+		activeResume = undefined;
+		clearResumeAckTimer();
+	}
+
+	function failResume(pending: PendingResume, ctx: ExtensionContext, error: unknown): void {
+		if (activeResume !== pending) return;
+		activeResume = undefined;
+		clearResumeAckTimer();
+		console.error(`[pi-compactor] failed to continue after compaction: ${errorSummary(error)}`);
+		if (pending.attempts >= MAX_RESUME_ATTEMPTS || pendingResume) return;
+		pendingResume = pending;
+		schedulePendingResume(ctx);
+	}
+
+	function sendResume(pending: PendingResume, ctx: ExtensionContext): void {
+		pending.attempts += 1;
+		activeResume = pending;
 		try {
-			void Promise.resolve(pi.sendUserMessage(message)).catch((error) => {
-				console.error(`[pi-compactor] failed to continue after compaction: ${errorSummary(error)}`);
-			});
+			// The current pi.sendUserMessage API is fire-and-forget and returns void.
+			// A future awaitable implementation, and test doubles, may return a
+			// promise; handle both without treating void as successful delivery.
+			const dispatch = (pi.sendUserMessage as unknown as (message: string) => unknown)(pending.message);
+			if (dispatch !== undefined) {
+				if (dispatch && typeof (dispatch as PromiseLike<unknown>).then === "function") {
+					void Promise.resolve(dispatch).then(
+						() => acknowledgeResume(pending),
+						(error) => failResume(pending, ctx, error),
+					);
+				} else {
+					acknowledgeResume(pending);
+				}
+				return;
+			}
+			// Pi has no acknowledgement for a void dispatch. The next prompt's
+			// before_agent_start event is the delivery acknowledgement; if it never
+			// arrives, retry after a bounded delay.
+			resumeAckTimer = setTimeout(() => {
+				resumeAckTimer = undefined;
+				failResume(pending, ctx, new Error("prompt dispatch was not acknowledged"));
+			}, RESUME_ACK_TIMEOUT_MS);
 		} catch (error) {
-			console.error(`[pi-compactor] failed to continue after compaction: ${errorSummary(error)}`);
+			failResume(pending, ctx, error);
 		}
 	}
 
@@ -151,8 +202,10 @@ export default function (pi: ExtensionAPI) {
 		// Manual compaction aborts the active run. Do not put the recovery prompt
 		// into that run's follow-up queue while lifecycle state is being rebuilt.
 		if (!ctx.isIdle()) return;
+		// Remove the pending marker before dispatch so the resumed run can request
+		// another compaction without being rejected as a duplicate.
 		pendingResume = undefined;
-		sendResume(pending.message);
+		sendResume(pending, ctx);
 	}
 
 	function schedulePendingResume(ctx: ExtensionContext): void {
@@ -167,7 +220,7 @@ export default function (pi: ExtensionAPI) {
 
 	function queueResume(message: string, ctx: ExtensionContext): void {
 		if (pendingResume) return;
-		pendingResume = { message };
+		pendingResume = { message, attempts: 0 };
 		schedulePendingResume(ctx);
 	}
 
@@ -219,6 +272,19 @@ export default function (pi: ExtensionAPI) {
 		}, 0);
 	}
 
+	pi.on("input", (event) => {
+		const pending = activeResume;
+		// While a resume is active, the next extension-originated input is the
+		// fire-and-forget dispatch. Use its source rather than text because later
+		// input handlers may transform the prompt before before_agent_start.
+		resumeInputSeen = pending !== undefined && event.source === "extension";
+	});
+	pi.on("before_agent_start", (event) => {
+		const pending = activeResume;
+		if (pending && (resumeInputSeen || event.prompt === pending.message)) acknowledgeResume(pending);
+		resumeInputSeen = false;
+	});
+
 	// ── Context usage awareness ──────────────────────────────────────────
 	pi.on("context", (event, ctx) => {
 		const usage = ctx.getContextUsage();
@@ -255,15 +321,26 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
-		// Mark the compaction started by our ctx.compact call. session_compact is
-		// also emitted for competing requests, and only those may reconcile the
-		// pending request before its own completion callback.
-		if (event.reason === "manual" && pendingCompaction?.phase === "compacting") {
-			pendingCompaction.owned = true;
+		// Claim only the first manual compaction event after ctx.compact starts.
+		// A later manual event is a competing /compact request; cancel it rather
+		// than letting two compactions mutate the session concurrently.
+		if (event.reason === "manual" && pendingCompaction) {
+			if (pendingCompaction.phase === "awaiting-settlement") {
+				// A user /compact request won before the deferred tool request
+				// started. Release the tool request immediately so its timer cannot
+				// start a second compaction while this one is summarizing.
+				finishCompaction(pendingCompaction, ctx);
+			} else {
+				if (pendingCompaction.owned) return { cancel: true };
+				pendingCompaction.owned = true;
+			}
 		}
 		// Pi's threshold compaction wins if it starts before our settled-boundary
-		// request. It already owns overflow recovery and any queued continuation.
-		if (event.reason === "threshold" && pendingCompaction) return { cancel: true };
+		// request. Let all compaction handlers observe it; cancelling here would
+		// make behavior depend on whether another extension ran before this one.
+		if (event.reason === "threshold" && pendingCompaction) {
+			finishCompaction(pendingCompaction, ctx);
+		}
 		// An overflow compaction can start before a deferred manual request. Do not
 		// race it; Pi will retry the interrupted turn when willRetry is true.
 		if (event.reason === "overflow" && pendingCompaction) {

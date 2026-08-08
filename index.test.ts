@@ -349,7 +349,7 @@ describe("compact tool lifecycle", () => {
 		expect(sentMessages).toHaveLength(1);
 	});
 
-	test("prioritizes a pending manual compaction over Pi threshold compaction", async () => {
+	test("lets Pi threshold compaction win over a pending tool compaction", async () => {
 		const handlers = new Map<string, (...args: any[]) => any>();
 		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
 		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -375,17 +375,14 @@ describe("compact tool lifecycle", () => {
 		const result = await tool.execute("one", {}, undefined, undefined, context);
 		const beforeCompact = handlers.get("session_before_compact");
 		expect(beforeCompact).toBeDefined();
-		expect(await beforeCompact!({ reason: "threshold" }, context)).toEqual({ cancel: true });
+		expect(await beforeCompact!({ reason: "threshold" }, context)).toBeUndefined();
 		await flushTimers();
 		expect(result.terminate).toBe(true);
 		expect(compactRequests).toHaveLength(0);
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		await flushTimers();
-		expect(compactRequests).toHaveLength(1);
-
-		compactRequests[0].onComplete();
-		await flushTimers();
-		expect(sentMessages).toEqual(["Continue."]);
+		expect(compactRequests).toHaveLength(0);
+		expect(sentMessages).toEqual([]);
 	});
 
 	test("does not continue when Pi already compacted before the tool request", async () => {
@@ -447,7 +444,9 @@ describe("compact tool lifecycle", () => {
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
 		await flushTimers();
 		expect(compactRequests).toHaveLength(1);
-		handlers.get("session_before_compact")?.({ reason: "manual" }, context);
+		const beforeCompact = handlers.get("session_before_compact");
+		expect(await beforeCompact?.({ reason: "manual" }, context)).toBeUndefined();
+		expect(await beforeCompact?.({ reason: "manual" }, context)).toEqual({ cancel: true });
 		handlers.get("session_compact")?.({ reason: "manual", willRetry: false }, context);
 		await flushTimers();
 		expect(sentMessages).toEqual([]);
@@ -455,6 +454,55 @@ describe("compact tool lifecycle", () => {
 		compactRequests[0].onComplete();
 		await flushTimers();
 		expect(sentMessages).toEqual(["Continue."]);
+	});
+
+	test("retries a failed recovery prompt without losing it", async () => {
+		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
+		const handlers = new Map<string, (...args: any[]) => any>();
+		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
+		const sentMessages: string[] = [];
+		let sendAttempts = 0;
+		let tool: any;
+		const pi = {
+			getFlag: () => undefined,
+			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
+			registerFlag: () => undefined,
+			registerTool: (definition: unknown) => {
+				tool = definition;
+			},
+			sendUserMessage: (message: string) => {
+				sendAttempts += 1;
+				if (sendAttempts === 1) return Promise.reject(new Error("session not ready"));
+				sentMessages.push(message);
+			},
+		} as unknown as ExtensionAPI;
+
+		const { default: registerExtension } = await import("./index");
+		registerExtension(pi);
+		const context = {
+			isIdle: () => true,
+			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
+		} as unknown as ExtensionContext;
+
+		await tool.execute("one", {}, undefined, undefined, context);
+		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);
+		await flushTimers();
+		expect(compactRequests).toHaveLength(1);
+
+		const originalConsoleError = console.error;
+		console.error = () => undefined;
+		try {
+			compactRequests[0].onComplete();
+			await flushTimers();
+			await flushTimers();
+		} finally {
+			console.error = originalConsoleError;
+		}
+		expect(sendAttempts).toBe(2);
+		expect(sentMessages).toEqual(["Continue."]);
+		handlers.get("input")?.({ source: "extension", text: "Continue." }, context);
+		handlers.get("before_agent_start")?.({ prompt: "transformed Continue." }, context);
+		await flushTimers();
 	});
 
 	test("does not add a duplicate continuation to Pi's overflow retry", async () => {

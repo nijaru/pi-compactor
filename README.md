@@ -42,7 +42,7 @@ The project file is `<pi-config-dir>/compaction-policy.json` (normally `.pi/comp
 3. the global file
 4. Pi's default compaction model
 
-Configured models are retried only for transient failures. Empty summaries, permanent failures, invalid selectors, and missing authentication fall back to the next configured model and finally Pi's default. When a provider-native compaction extension such as OpenAI Responses compaction is installed, leave `compaction-model` unset so that extension can own the saved compaction details.
+Configured models are retried only for transient failures. Empty summaries, permanent failures, invalid selectors, and missing authentication fall back to the next configured model and finally Pi's default. When the companion [`pi-provider-compaction`](https://github.com/nijaru/pi-provider-compaction) extension is installed, leave `compaction-model` unset so its provider-native adapter can own the saved compaction details. Without a provider-native adapter, Pi's default compaction path remains available.
 
 ## License
 

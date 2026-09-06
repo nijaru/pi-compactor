@@ -14,7 +14,7 @@ Pi extension for model-driven context compaction.
 
 ## Conventions
 
-- Single file (`index.ts`). No splitting unless it grows past ~300 lines.
+- Two source files: `index.ts` owns the compaction and resume lifecycle; `policy.ts` owns pure, testable policy (thresholds, selector resolution, error classification). Add a new module only when a concern has an independent reason to exist — not to shorten a file.
 - All thresholds and tuning constants live in source with comments, not in config files.
 - Config is for the compaction model only. Don't add threshold config — those are design decisions, not user preferences.
 - Test against real sessions. Threshold tuning requires observing actual context usage patterns.

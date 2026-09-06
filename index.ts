@@ -27,6 +27,7 @@ const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 1_000;
 const MAX_RESUME_ATTEMPTS = 2;
 const RESUME_ACK_TIMEOUT_MS = 5_000;
+export { RESUME_ACK_TIMEOUT_MS };
 const RESUME_CUSTOM_TYPE = "pi-compactor-resume";
 const RESUME_MESSAGE = "Resume only unfinished work; if none remains, give the final response and stop.";
 const RESUME_AFTER_FAILURE_MESSAGE =
@@ -175,30 +176,17 @@ export default function (pi: ExtensionAPI) {
 		try {
 			// Keep the recovery instruction out of the visible user transcript while
 			// still putting it in model context and starting a new turn.
-			const dispatch = (pi.sendMessage as unknown as (
-				message: { customType: string; content: string; display: boolean },
-				options: { triggerTurn: boolean },
-			) => unknown)(
-				{
-					customType: RESUME_CUSTOM_TYPE,
-					content: pending.message,
-					display: false,
-				},
+			//
+			// Pi binds sendMessage to a void dispatcher: it returns no delivery
+			// promise and swallows delivery errors into the runner's error log. The
+			// next agent_start event is the only delivery confirmation; retry after
+			// a bounded delay when it never arrives. agent_start fires for any turn
+			// start, not just this one, so a spurious ack can mask a dropped resume
+			// — accepted: a missing retry is worse than a rare missed failure.
+			pi.sendMessage(
+				{ customType: RESUME_CUSTOM_TYPE, content: pending.message, display: false },
 				{ triggerTurn: true },
 			);
-			if (dispatch !== undefined) {
-				if (dispatch && typeof (dispatch as PromiseLike<unknown>).then === "function") {
-					void Promise.resolve(dispatch).then(
-						() => acknowledgeResume(pending),
-						(error) => failResume(pending, ctx, error),
-					);
-				} else {
-					acknowledgeResume(pending);
-				}
-				return;
-			}
-			// Pi has no acknowledgement for a void dispatch. The next agent_start
-			// event confirms delivery; retry after a bounded delay if it never arrives.
 			resumeAckTimer = setTimeout(() => {
 				resumeAckTimer = undefined;
 				failResume(pending, ctx, new Error("prompt dispatch was not acknowledged"));

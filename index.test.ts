@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	RESUME_ACK_TIMEOUT_MS,
 	hintPercent,
 	isTransientError,
 	isUsableCompactionResult,
@@ -16,6 +17,7 @@ const temporaryDirectories: string[] = [];
 const projectConfigDir = (directory: string) => join(directory, CONFIG_DIR_NAME);
 
 afterEach(async () => {
+	jest.useRealTimers();
 	await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
@@ -512,13 +514,17 @@ describe("compact tool lifecycle", () => {
 		expect(sentMessages).toEqual(["Resume only unfinished work; if none remains, give the final response and stop."]);
 	});
 
-	test("retries a failed recovery prompt without losing it", async () => {
+	test("retries a dropped recovery prompt after the ack timeout", async () => {
 		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
 		const handlers = new Map<string, (...args: any[]) => any>();
 		const flushTimers = () => new Promise((resolve) => setTimeout(resolve, 0));
 		const sentMessages: string[] = [];
 		let sendAttempts = 0;
+		let secondDispatchAcked = false;
 		let tool: any;
+		// Model Pi's real dispatcher: void return, no delivery promise. The first
+		// dispatch is dropped (no agent_start ever fires for it); the second
+		// delivers and starts its turn.
 		const pi = {
 			getFlag: () => undefined,
 			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
@@ -528,9 +534,11 @@ describe("compact tool lifecycle", () => {
 			},
 			sendMessage: (message: any) => {
 				sendAttempts += 1;
-				if (sendAttempts === 1) return Promise.reject(new Error("session not ready"));
 				sentMessages.push(message.content);
-				return Promise.resolve();
+				if (sendAttempts === 2) {
+					secondDispatchAcked = true;
+					handlers.get("agent_start")?.({ type: "agent_start" });
+				}
 			},
 		} as unknown as ExtensionAPI;
 
@@ -548,15 +556,31 @@ describe("compact tool lifecycle", () => {
 
 		const originalConsoleError = console.error;
 		console.error = () => undefined;
+		// Under fake timers a setTimeout-based flush would queue a resolve-timer
+		// nothing advances; fire scheduled timers synchronously instead and drain
+		// microtasks only.
+		const drain = async () => {
+			for (let i = 0; i < 5; i++) await Promise.resolve();
+		};
+		jest.useFakeTimers();
 		try {
 			compactRequests[0].onComplete();
-			await flushTimers();
-			await flushTimers();
+			jest.advanceTimersByTime(0); // resumeTimer → first dispatch + ack timer
+			await drain();
+			// The dropped dispatch got no agent_start: nothing more happens until
+			// the ack timeout fires.
+			expect(sendAttempts).toBe(1);
+			jest.advanceTimersByTime(RESUME_ACK_TIMEOUT_MS); // ack timeout → requeued resume
+			jest.advanceTimersByTime(0); // retry dispatch, acked by agent_start
+			await drain();
 		} finally {
+			jest.useRealTimers();
 			console.error = originalConsoleError;
 		}
 		expect(sendAttempts).toBe(2);
+		expect(secondDispatchAcked).toBe(true);
 		expect(sentMessages).toEqual([
+			"Resume only unfinished work; if none remains, give the final response and stop.",
 			"Resume only unfinished work; if none remains, give the final response and stop.",
 		]);
 	});

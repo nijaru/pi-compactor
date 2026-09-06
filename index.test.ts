@@ -41,6 +41,27 @@ describe("context hints", () => {
 		expect(shouldInject({ tokens: 65_000, percent: 50, contextWindow: 128_000 }, { tokens: 70_000, percent: 55 })).toBe(true);
 	});
 
+	test("appends the >200k marker once tokens reach the cost tier", async () => {
+		const handlers = new Map<string, (...args: any[]) => any>();
+		const pi = {
+			getFlag: () => undefined,
+			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
+			registerFlag: () => undefined,
+			registerTool: () => undefined,
+		} as unknown as ExtensionAPI;
+		const { default: registerExtension } = await import("./index");
+		registerExtension(pi);
+
+		const event = { messages: [] as Array<{ content: string }> };
+		handlers.get("context")?.(event, {
+			getContextUsage: () => ({ tokens: 210_000, percent: 21, contextWindow: 1_000_000 }),
+		} as unknown as ExtensionContext);
+
+		expect(event.messages).toEqual([
+			expect.objectContaining({ content: "[ctx 210k/1.0m] [>200k]" }),
+		]);
+	});
+
 	test("shows the percentage when the token count is unavailable", async () => {
 		const handlers = new Map<string, (...args: any[]) => any>();
 		const pi = {

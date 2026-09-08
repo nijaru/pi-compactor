@@ -1,6 +1,6 @@
 {
   "name": "pi-compactor",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Pi extension that gives the LLM a compact tool for context management",
   "type": "module",
   "pi": {

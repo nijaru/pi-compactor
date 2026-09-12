@@ -5,7 +5,7 @@ Pi extension that lets the LLM manage its own context compaction. The model deci
 ## Installation
 
 ```bash
-pi install git:github.com/nijaru/pi-compactor
+pi install npm:@nijaru/pi-compactor
 ```
 
 ## How it works

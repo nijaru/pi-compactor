@@ -1,8 +1,23 @@
 {
-  "name": "pi-compactor",
+  "name": "@nijaru/pi-compactor",
   "version": "0.0.1",
   "description": "Pi extension that gives the LLM a compact tool for context management",
   "type": "module",
+  "license": "MIT",
+  "author": "Nick Naru <nick@nijaru.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nijaru/pi-compactor.git"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "compaction"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "pi": {
     "extensions": [
       "./index.ts"

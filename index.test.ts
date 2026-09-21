@@ -252,9 +252,11 @@ describe("configured compaction models", () => {
 		expect(streamCalls[0].model.baseUrl).toBe("https://resolved.example/v1");
 		expect(streamCalls[0].options).toMatchObject({
 			apiKey: "resolved-key",
-			headers: { "x-test": "value" },
 			env: { REGION: "test" },
 		});
+		// `null` deletes a provider default header; stripping it would silently
+		// restore the header the resolved auth config disabled.
+		expect(streamCalls[0].options.headers).toEqual({ "x-test": "value", "x-delete": null });
 	});
 });
 

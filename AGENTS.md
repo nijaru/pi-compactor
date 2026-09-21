@@ -14,6 +14,7 @@ Pi extension for model-driven context compaction.
 
 ## Conventions
 
+- Compaction requests pass Pi's resolved `ProviderHeaders` through unchanged. `null` deletes a provider default header, so filtering it out would silently restore a header the auth config disabled.
 - Two source files: `index.ts` owns the compaction and resume lifecycle; `policy.ts` owns pure, testable policy (thresholds, selector resolution, error classification). Add a new module only when a concern has an independent reason to exist — not to shorten a file.
 - All thresholds and tuning constants live in source with comments, not in config files.
 - Config is for the compaction model only. Don't add threshold config — those are design decisions, not user preferences.

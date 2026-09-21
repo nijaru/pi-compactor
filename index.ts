@@ -37,14 +37,11 @@ type CompactionModel = Parameters<typeof compact>[1];
 type ResolvedModel = {
 	model: CompactionModel;
 	apiKey?: string;
-	headers?: Record<string, string>;
+	// Pi's ProviderHeaders carry `null` to delete a provider default; keep them so a
+	// configured deletion still applies to the summary request.
+	headers?: Record<string, string | null>;
 	env?: Record<string, string>;
 };
-
-function withoutDeletedHeaders(headers: Record<string, string | null> | undefined): Record<string, string> | undefined {
-	if (!headers) return undefined;
-	return Object.fromEntries(Object.entries(headers).filter(([, value]) => value !== null)) as Record<string, string>;
-}
 
 function sleep(ms: number, signal: AbortSignal): Promise<boolean> {
 	if (signal.aborted) return Promise.resolve(false);
@@ -95,7 +92,7 @@ async function resolveOne(selector: string, ctx: ExtensionContext): Promise<Reso
 		return {
 			model: requestModel,
 			apiKey: auth.apiKey,
-			headers: withoutDeletedHeaders(auth.headers),
+			headers: auth.headers,
 			env: auth.env,
 		};
 	} catch (error) {
@@ -364,11 +361,13 @@ export default function (pi: ExtensionAPI) {
 					// Use Pi's composed provider rather than @pi-ai/compat's global
 					// dispatcher. This preserves extension providers, resolved endpoints,
 					// and provider-specific request behavior for compaction calls.
+					// `compact` narrows headers to strings, but Pi's provider pipeline reads
+					// the same record and treats `null` as a deletion.
 					const result = await compact(
 						event.preparation,
 						resolved.model,
 						resolved.apiKey,
-						resolved.headers,
+						resolved.headers as Record<string, string> | undefined,
 						event.customInstructions,
 						event.signal,
 						undefined,

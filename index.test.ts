@@ -284,10 +284,10 @@ describe("compact tool lifecycle", () => {
 			compact: (options: { onComplete: () => void; onError: (error: Error) => void }) => compactRequests.push(options),
 		} as unknown as ExtensionContext;
 		const first = await tool.execute("one", { continueAfterCompaction: true }, undefined, undefined, context);
-		const second = await tool.execute("two", { continueAfterCompaction: true }, undefined, undefined, context);
 		expect(first.isError).toBeUndefined();
 		expect(first.terminate).toBe(true);
-		expect(second.isError).toBe(true);
+		await expect(tool.execute("two", { continueAfterCompaction: true }, undefined, undefined, context))
+			.rejects.toThrow("Compaction is already in progress.");
 		expect(compactRequests).toHaveLength(0);
 		await flushTimers();
 		expect(compactRequests).toHaveLength(0);
@@ -395,8 +395,8 @@ describe("compact tool lifecycle", () => {
 		compactRequests[0].onComplete();
 		await flushTimers();
 		expect(sentMessages).toEqual([]);
-		const duplicate = await tool.execute("two", { continueAfterCompaction: true }, undefined, undefined, context);
-		expect(duplicate.isError).toBe(true);
+		await expect(tool.execute("two", { continueAfterCompaction: true }, undefined, undefined, context))
+			.rejects.toThrow("Compaction is already in progress.");
 
 		idle = true;
 		handlers.get("agent_settled")?.({ type: "agent_settled" }, context);

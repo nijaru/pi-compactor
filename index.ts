@@ -463,11 +463,9 @@ export default function (pi: ExtensionAPI) {
 		executionMode: "sequential",
 		async execute(_toolCallId, params) {
 			if (pendingCompaction || pendingResume) {
-				return {
-					content: [{ type: "text", text: "Compaction is already in progress." }],
-					details: {},
-					isError: true,
-				};
+				// Pi derives a tool error from a thrown error; a returned `isError` field is
+				// ignored and would record the duplicate request as a successful result.
+				throw new Error("Compaction is already in progress.");
 			}
 
 			pendingCompaction = {

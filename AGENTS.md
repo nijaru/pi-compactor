@@ -1,6 +1,8 @@
 # pi-compactor
 
-Pi extension for model-driven context compaction.
+Pi extension for model-driven context compaction. Development checks target Pi 1.0.2.
+
+Run `bun run check` (tests and typecheck). Pi loads the TypeScript source; there is no build step.
 
 ## Design principles
 

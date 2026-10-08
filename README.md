@@ -46,7 +46,7 @@ Configured models are retried only for transient failures. Empty summaries, perm
 
 ## Development
 
-Development checks target Pi 1.0.2. Run `bun install` and `bun run check` (tests and typecheck). Pi loads the TypeScript source directly; no build step is needed.
+Development checks target Pi 1.1.0. Run `bun install` and `bun run check` (tests and typecheck). Pi loads the TypeScript source directly; no build step is needed.
 
 ## License
 

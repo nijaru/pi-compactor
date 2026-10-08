@@ -412,7 +412,14 @@ export default function (pi: ExtensionAPI) {
 			finishCompaction(request, ctx);
 		}
 	});
-	pi.on("agent_settled", (_event, ctx) => {
+	pi.on("agent_settled", (event, ctx) => {
+		// A canceled run must not start deferred work or retry a queued resume.
+		// An already-started ctx.compact can itself abort the old run; its own
+		// completion/error callback remains authoritative for that request.
+		if (event.aborted && pendingCompaction?.phase !== "compacting") {
+			resetLifecycle();
+			return;
+		}
 		// ctx.compact aborts an active operation. Starting it from the compact tool
 		// (even on a zero-delay timer) can race tool-result persistence and turn
 		// accounting. agent_settled is the first lifecycle event that guarantees no

@@ -261,6 +261,34 @@ describe("configured compaction models", () => {
 });
 
 describe("compact tool lifecycle", () => {
+	test.each(["before settlement", "scheduled compaction", "queued resume", "in-flight compaction"] as const)("honors aborted settlement: %s", async stage => {
+		jest.useFakeTimers();
+		const handlers = new Map<string, (...args: any[]) => any>();
+		const compactRequests: Array<{ onComplete: () => void }> = [];
+		const sentMessages: string[] = [];
+		let tool: any;
+		const { default: registerExtension } = await import("./index");
+		registerExtension({
+			getFlag: () => undefined,
+			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
+			registerFlag: () => undefined,
+			registerTool: (definition: unknown) => { tool = definition; },
+			sendMessage: (message: any) => sentMessages.push(message.content),
+		} as unknown as ExtensionAPI);
+		const ctx = { isIdle: () => true, compact: (options: any) => compactRequests.push(options) } as unknown as ExtensionContext;
+		try {
+			await tool.execute("call", { continueAfterCompaction: true });
+			if (stage !== "before settlement") handlers.get("agent_settled")!({ aborted: false }, ctx);
+			if (stage === "queued resume" || stage === "in-flight compaction") jest.advanceTimersByTime(0);
+			if (stage === "queued resume") compactRequests[0].onComplete();
+			handlers.get("agent_settled")!({ aborted: true }, ctx);
+			if (stage === "in-flight compaction") compactRequests[0].onComplete();
+			jest.advanceTimersByTime(0);
+			expect(compactRequests).toHaveLength(stage === "queued resume" || stage === "in-flight compaction" ? 1 : 0);
+			expect(sentMessages).toHaveLength(stage === "in-flight compaction" ? 1 : 0);
+			if (stage !== "in-flight compaction") await expect(tool.execute("new-call", { continueAfterCompaction: false })).resolves.toMatchObject({ terminate: true });
+		} finally { handlers.get("session_shutdown")!({}, ctx); }
+	});
 	test("waits for settlement, serializes in-flight compactions, and resumes after completion", async () => {
 		const compactRequests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
 		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => void>();

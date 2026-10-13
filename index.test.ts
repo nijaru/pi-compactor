@@ -553,8 +553,8 @@ describe("compact tool lifecycle", () => {
 		let secondDispatchAcked = false;
 		let tool: any;
 		// Model Pi's real dispatcher: void return, no delivery promise. The first
-		// dispatch is dropped (no agent_start ever fires for it); the second
-		// delivers and starts its turn.
+		// dispatch is dropped (no matching startup hook fires); the second
+		// delivers and acknowledges its specific custom message.
 		const pi = {
 			getFlag: () => undefined,
 			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
@@ -567,7 +567,7 @@ describe("compact tool lifecycle", () => {
 				sentMessages.push(message.content);
 				if (sendAttempts === 2) {
 					secondDispatchAcked = true;
-					handlers.get("agent_start")?.({ type: "agent_start" });
+					handlers.get("before_agent_start")?.({ messageType: "custom", message });
 				}
 			},
 		} as unknown as ExtensionAPI;
@@ -597,11 +597,11 @@ describe("compact tool lifecycle", () => {
 			compactRequests[0].onComplete();
 			jest.advanceTimersByTime(0); // resumeTimer → first dispatch + ack timer
 			await drain();
-			// The dropped dispatch got no agent_start: nothing more happens until
-			// the ack timeout fires.
+			// The dropped dispatch got no matching startup hook: nothing more
+			// happens until the acknowledgement timeout fires.
 			expect(sendAttempts).toBe(1);
 			jest.advanceTimersByTime(RESUME_ACK_TIMEOUT_MS); // ack timeout → requeued resume
-			jest.advanceTimersByTime(0); // retry dispatch, acked by agent_start
+			jest.advanceTimersByTime(0); // retry dispatch, acknowledged by its custom-message hook
 			await drain();
 		} finally {
 			jest.useRealTimers();

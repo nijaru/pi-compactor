@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { compact } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -114,7 +115,7 @@ export default function (pi: ExtensionAPI) {
 		phase: "awaiting-settlement" | "compacting";
 		owned?: boolean;
 	};
-	type PendingResume = { message: string; attempts: number };
+	type PendingResume = { id: string; message: string; attempts: number };
 	let pendingCompaction: PendingCompaction | undefined;
 	let pendingResume: PendingResume | undefined;
 	let activeResume: PendingResume | undefined;
@@ -152,9 +153,14 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function acknowledgeResume(pending: PendingResume): void {
-		if (activeResume !== pending) return;
-		activeResume = undefined;
-		clearResumeAckTimer();
+		if (activeResume === pending) {
+			activeResume = undefined;
+			clearResumeAckTimer();
+		}
+		if (pendingResume === pending) {
+			pendingResume = undefined;
+			clearResumeTimer();
+		}
 	}
 
 	function failResume(pending: PendingResume, ctx: ExtensionContext, error: unknown): void {
@@ -174,19 +180,18 @@ export default function (pi: ExtensionAPI) {
 			// Keep the recovery instruction out of the visible user transcript while
 			// still putting it in model context and starting a new turn.
 			//
-			// Pi binds sendMessage to a void dispatcher: it returns no delivery
-			// promise and swallows delivery errors into the runner's error log. The
-			// next agent_start event is the only delivery confirmation; retry after
-			// a bounded delay when it never arrives. agent_start fires for any turn
-			// start, not just this one, so a spurious ack can mask a dropped resume
-			// — accepted: a missing retry is worse than a rare missed failure.
+			// sendMessage has no delivery promise. Pi 1.2 identifies the actual
+			// custom message in before_agent_start, before slow startup hooks finish.
 			pi.sendMessage(
-				{ customType: RESUME_CUSTOM_TYPE, content: pending.message, display: false },
+				{ customType: RESUME_CUSTOM_TYPE, content: pending.message, display: false, details: { resumeId: pending.id } },
 				{ triggerTurn: true },
 			);
+			if (activeResume !== pending) return;
 			resumeAckTimer = setTimeout(() => {
 				resumeAckTimer = undefined;
-				failResume(pending, ctx, new Error("prompt dispatch was not acknowledged"));
+				// Busy startup is not evidence of a dropped message. Keep the request
+				// until its matching hook acknowledges it or the session settles.
+				if (ctx.isIdle()) failResume(pending, ctx, new Error("prompt dispatch was not acknowledged"));
 			}, RESUME_ACK_TIMEOUT_MS);
 		} catch (error) {
 			failResume(pending, ctx, error);
@@ -216,7 +221,7 @@ export default function (pi: ExtensionAPI) {
 
 	function queueResume(message: string, ctx: ExtensionContext): void {
 		if (pendingResume) return;
-		pendingResume = { message, attempts: 0 };
+		pendingResume = { id: randomUUID(), message, attempts: 0 };
 		schedulePendingResume(ctx);
 	}
 
@@ -273,8 +278,12 @@ export default function (pi: ExtensionAPI) {
 		}, 0);
 	}
 
-	pi.on("agent_start", () => {
-		const pending = activeResume;
+	pi.on("before_agent_start", (event) => {
+		if (event.messageType !== "custom" || event.message.customType !== RESUME_CUSTOM_TYPE) return;
+		const resumeId = (event.message.details as { resumeId?: unknown } | undefined)?.resumeId;
+		const pending = activeResume?.id === resumeId
+			? activeResume
+			: pendingResume?.id === resumeId ? pendingResume : undefined;
 		if (pending) acknowledgeResume(pending);
 	});
 
@@ -424,6 +433,9 @@ export default function (pi: ExtensionAPI) {
 		// (even on a zero-delay timer) can race tool-result persistence and turn
 		// accounting. agent_settled is the first lifecycle event that guarantees no
 		// retry or follow-up remains.
+		if (activeResume && resumeAckTimer === undefined) {
+			failResume(activeResume, ctx, new Error("prompt dispatch was not acknowledged"));
+		}
 		if (pendingCompaction?.phase === "awaiting-settlement") scheduleCompaction(ctx);
 		if (pendingResume) schedulePendingResume(ctx);
 	});

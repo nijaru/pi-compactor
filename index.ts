@@ -26,9 +26,6 @@ export type { ContextUsageLike } from "./policy";
 
 const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 1_000;
-const MAX_RESUME_ATTEMPTS = 2;
-const RESUME_ACK_TIMEOUT_MS = 5_000;
-export { RESUME_ACK_TIMEOUT_MS };
 const RESUME_CUSTOM_TYPE = "pi-compactor-resume";
 const RESUME_MESSAGE = "Resume only unfinished work; if none remains, give the final response and stop.";
 const RESUME_AFTER_FAILURE_MESSAGE =
@@ -115,176 +112,63 @@ export default function (pi: ExtensionAPI) {
 		phase: "awaiting-settlement" | "compacting";
 		owned?: boolean;
 	};
-	type PendingResume = { id: string; message: string; attempts: number };
+	type PendingResume = { id: string };
 	let pendingCompaction: PendingCompaction | undefined;
 	let pendingResume: PendingResume | undefined;
-	let activeResume: PendingResume | undefined;
-	let resumeAckTimer: ReturnType<typeof setTimeout> | undefined;
-	let compactionTimer: ReturnType<typeof setTimeout> | undefined;
-	let resumeTimer: ReturnType<typeof setTimeout> | undefined;
-
-	function clearCompactionTimer(): void {
-		if (compactionTimer === undefined) return;
-		clearTimeout(compactionTimer);
-		compactionTimer = undefined;
-	}
-
-	function clearResumeTimer(): void {
-		if (resumeTimer === undefined) return;
-		clearTimeout(resumeTimer);
-		resumeTimer = undefined;
-	}
-
-	function clearResumeAckTimer(): void {
-		if (resumeAckTimer === undefined) return;
-		clearTimeout(resumeAckTimer);
-		resumeAckTimer = undefined;
-	}
 
 	function resetLifecycle(): void {
-		// Timer and callback closures retain their request object. Clearing the
-		// reference invalidates them without a separate generation counter.
+		// Callback closures retain their request object. Clearing the reference
+		// invalidates them without a separate generation counter.
 		pendingCompaction = undefined;
 		pendingResume = undefined;
-		activeResume = undefined;
-		clearResumeAckTimer();
-		clearCompactionTimer();
-		clearResumeTimer();
 	}
 
-	function acknowledgeResume(pending: PendingResume): void {
-		if (activeResume === pending) {
-			activeResume = undefined;
-			clearResumeAckTimer();
-		}
-		if (pendingResume === pending) {
-			pendingResume = undefined;
-			clearResumeTimer();
-		}
-	}
-
-	function failResume(pending: PendingResume, ctx: ExtensionContext, error: unknown): void {
-		if (activeResume !== pending) return;
-		activeResume = undefined;
-		clearResumeAckTimer();
-		console.error(`[pi-compactor] failed to continue after compaction: ${errorSummary(error)}`);
-		if (pending.attempts >= MAX_RESUME_ATTEMPTS || pendingResume) return;
+	function dispatchResume(message: string): void {
+		const pending = { id: randomUUID() };
 		pendingResume = pending;
-		schedulePendingResume(ctx);
+		// Called within agent_settled: Pi queues this synchronously and awaits the
+		// new run after all settled handlers finish. No delivery timeout is needed:
+		// even slow settled/startup hooks remain owned by the original prompt().
+		pi.sendMessage(
+			{ customType: RESUME_CUSTOM_TYPE, content: message, display: false, details: { resumeId: pending.id } },
+			{ triggerTurn: true },
+		);
 	}
 
-	function sendResume(pending: PendingResume, ctx: ExtensionContext): void {
-		pending.attempts += 1;
-		activeResume = pending;
-		try {
-			// Keep the recovery instruction out of the visible user transcript while
-			// still putting it in model context and starting a new turn.
-			//
-			// sendMessage has no delivery promise. Pi 1.2 identifies the actual
-			// custom message in before_agent_start, before slow startup hooks finish.
-			pi.sendMessage(
-				{ customType: RESUME_CUSTOM_TYPE, content: pending.message, display: false, details: { resumeId: pending.id } },
-				{ triggerTurn: true },
-			);
-			if (activeResume !== pending) return;
-			resumeAckTimer = setTimeout(() => {
-				resumeAckTimer = undefined;
-				// Busy startup is not evidence of a dropped message. Keep the request
-				// until its matching hook acknowledges it or the session settles.
-				if (ctx.isIdle()) failResume(pending, ctx, new Error("prompt dispatch was not acknowledged"));
-			}, RESUME_ACK_TIMEOUT_MS);
-		} catch (error) {
-			failResume(pending, ctx, error);
-		}
-	}
-
-	function flushPendingResume(pending: PendingResume, ctx: ExtensionContext): void {
-		if (pendingResume !== pending) return;
-		// Manual compaction aborts the active run. Do not put the recovery prompt
-		// into that run's follow-up queue while lifecycle state is being rebuilt.
-		if (!ctx.isIdle()) return;
-		// Remove the pending marker before dispatch so the resumed run can request
-		// another compaction without being rejected as a duplicate.
-		pendingResume = undefined;
-		sendResume(pending, ctx);
-	}
-
-	function schedulePendingResume(ctx: ExtensionContext): void {
-		if (resumeTimer !== undefined) return;
-		const pending = pendingResume;
-		if (!pending) return;
-		resumeTimer = setTimeout(() => {
-			resumeTimer = undefined;
-			flushPendingResume(pending, ctx);
-		}, 0);
-	}
-
-	function queueResume(message: string, ctx: ExtensionContext): void {
-		if (pendingResume) return;
-		pendingResume = { id: randomUUID(), message, attempts: 0 };
-		schedulePendingResume(ctx);
-	}
-
-	function finishCompaction(
-		request: PendingCompaction,
-		ctx: ExtensionContext,
-		resumeMessage?: string,
-	): void {
-		if (pendingCompaction !== request) return;
-		pendingCompaction = undefined;
-		clearCompactionTimer();
-		if (resumeMessage) queueResume(resumeMessage, ctx);
-	}
-
-	function startCompaction(request: PendingCompaction, ctx: ExtensionContext): void {
-		if (pendingCompaction !== request || request.phase !== "awaiting-settlement") return;
+	async function runCompaction(request: PendingCompaction, ctx: ExtensionContext): Promise<void> {
 		request.phase = "compacting";
-		const onComplete = () =>
-			finishCompaction(request, ctx, request.continueAfterCompaction ? RESUME_MESSAGE : undefined);
-		const onError = (error: Error) => {
-			if (pendingCompaction !== request) return;
-			if (/^already compacted$/i.test(error.message.trim())) {
-				// Pi already performed the compaction; resume only when the tool call
-				// explicitly said unfinished work remains.
-				finishCompaction(request, ctx, request.continueAfterCompaction ? RESUME_MESSAGE : undefined);
-				return;
+		// ctx.compact is callback-based. Await its actual completion, not the
+		// session_compact event (which fires before Pi clears compaction state).
+		const error = await new Promise<Error | undefined>((resolve) => {
+			try {
+				ctx.compact({
+					customInstructions: request.instructions,
+					onComplete: () => resolve(undefined),
+					onError: resolve,
+				});
+			} catch (error) {
+				resolve(error instanceof Error ? error : new Error(String(error)));
 			}
+		});
+		if (pendingCompaction !== request) return;
+		let message = RESUME_MESSAGE;
+		if (error && !/^already compacted$/i.test(error.message.trim())) {
 			console.error(`[pi-compactor] compaction failed: ${errorSummary(error)}`);
 			if (error.name === "AbortError" || /cancelled/i.test(error.message)) {
-				finishCompaction(request, ctx);
+				pendingCompaction = undefined;
 				return;
 			}
-			finishCompaction(
-				request,
-				ctx,
-				request.continueAfterCompaction ? RESUME_AFTER_FAILURE_MESSAGE : undefined,
-			);
-		};
-
-		try {
-			ctx.compact({ customInstructions: request.instructions, onComplete, onError });
-		} catch (error) {
-			onError(error instanceof Error ? error : new Error(String(error)));
+			message = RESUME_AFTER_FAILURE_MESSAGE;
 		}
-	}
-
-	function scheduleCompaction(ctx: ExtensionContext): void {
-		const request = pendingCompaction;
-		if (!request || request.phase !== "awaiting-settlement" || compactionTimer !== undefined) return;
-		compactionTimer = setTimeout(() => {
-			compactionTimer = undefined;
-			if (pendingCompaction !== request || request.phase !== "awaiting-settlement" || !ctx.isIdle()) return;
-			startCompaction(request, ctx);
-		}, 0);
+		pendingCompaction = undefined;
+		if (request.continueAfterCompaction) dispatchResume(message);
 	}
 
 	pi.on("before_agent_start", (event) => {
 		if (event.messageType !== "custom" || event.message.customType !== RESUME_CUSTOM_TYPE) return;
 		const resumeId = (event.message.details as { resumeId?: unknown } | undefined)?.resumeId;
-		const pending = activeResume?.id === resumeId
-			? activeResume
-			: pendingResume?.id === resumeId ? pendingResume : undefined;
-		if (pending) acknowledgeResume(pending);
+		// Startup hooks run while busy; acknowledge by identity, not idle state.
+		if (pendingResume && pendingResume.id === resumeId) pendingResume = undefined;
 	});
 
 	// ── Context usage awareness ──────────────────────────────────────────
@@ -339,27 +223,18 @@ export default function (pi: ExtensionAPI) {
 		if (event.reason === "manual" && pendingCompaction) {
 			if (pendingCompaction.phase === "awaiting-settlement") {
 				// A user /compact request won before the deferred tool request
-				// started. Release the tool request immediately so its timer cannot
-				// start a second compaction while this one is summarizing.
-				finishCompaction(pendingCompaction, ctx);
+				// started. Release the tool request so settlement cannot start a
+				// second compaction while this one is summarizing.
+				pendingCompaction = undefined;
 			} else {
 				if (pendingCompaction.owned) return { cancel: true };
 				pendingCompaction.owned = true;
 			}
 		}
-		// Pi's threshold compaction wins if it starts before our settled-boundary
-		// request. Let all compaction handlers observe it; cancelling here would
-		// make behavior depend on whether another extension ran before this one.
-		if (event.reason === "threshold" && pendingCompaction) {
-			finishCompaction(pendingCompaction, ctx);
-		}
-		// An overflow compaction can start before a deferred manual request. Do not
-		// race it; Pi will retry the interrupted turn when willRetry is true.
-		if (event.reason === "overflow" && pendingCompaction) {
-			// Pi owns overflow recovery. It retries when willRetry is true; otherwise
-			// the normal run settles without a compactor continuation.
-			finishCompaction(pendingCompaction, ctx);
-		}
+		// Pi owns automatic compaction and overflow recovery (including retries).
+		// Release our request without adding another continuation. Let all handlers
+		// observe it so behavior does not depend on extension registration order.
+		if (event.reason === "threshold" || event.reason === "overflow") pendingCompaction = undefined;
 
 		const selectors = readModelSelectors(pi, ctx);
 
@@ -419,7 +294,7 @@ export default function (pi: ExtensionAPI) {
 	// A saved compaction is authoritative even when another extension or /compact
 	// won the race. Reconcile it before ctx.compact's callback so an abandoned
 	// callback cannot leave the tool permanently in flight or resume twice.
-	pi.on("session_compact", (event, ctx) => {
+	pi.on("session_compact", () => {
 		resetThrottle();
 		const request = pendingCompaction;
 		// ctx.compact emits session_compact before its completion callback and while
@@ -428,26 +303,23 @@ export default function (pi: ExtensionAPI) {
 		if (request && !request.owned) {
 			// A competing /compact or Pi compaction owns this saved result. Do not
 			// emit the tool's recovery prompt for a compaction it did not start.
-			finishCompaction(request, ctx);
+			pendingCompaction = undefined;
 		}
 	});
-	pi.on("agent_settled", (event, ctx) => {
-		// A canceled run must not start deferred work or retry a queued resume.
-		// An already-started ctx.compact can itself abort the old run; its own
-		// completion/error callback remains authoritative for that request.
+	pi.on("agent_settled", async (event, ctx) => {
+		// A canceled run must not start deferred work. An already-started
+		// ctx.compact owns its completion/error callback.
 		if (event.aborted && pendingCompaction?.phase !== "compacting") {
 			resetLifecycle();
 			return;
 		}
-		// ctx.compact aborts an active operation. Starting it from the compact tool
-		// (even on a zero-delay timer) can race tool-result persistence and turn
-		// accounting. agent_settled is the first lifecycle event that guarantees no
-		// retry or follow-up remains.
-		if (activeResume && resumeAckTimer === undefined) {
-			failResume(activeResume, ctx, new Error("prompt dispatch was not acknowledged"));
+		// Pi marks the run idle before awaiting agent_settled handlers, so compact's
+		// abort/waitForIdle cannot deadlock here (unlike agent_before_settle).
+		// Keep prompt() awaiting compaction; synchronous sendMessage below enters
+		// Pi's deferred-settled queue, whose continuation is also awaited by Pi.
+		if (pendingCompaction?.phase === "awaiting-settlement" && ctx.isIdle()) {
+			await runCompaction(pendingCompaction, ctx);
 		}
-		if (pendingCompaction?.phase === "awaiting-settlement") scheduleCompaction(ctx);
-		if (pendingResume) schedulePendingResume(ctx);
 	});
 	pi.on("session_start", () => {
 		resetThrottle();

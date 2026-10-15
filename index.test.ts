@@ -2,7 +2,7 @@ import { afterEach, describe, expect, jest, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, createEventBus } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	RESUME_ACK_TIMEOUT_MS,
@@ -46,6 +46,7 @@ describe("context hints", () => {
 	test("appends the >200k marker once tokens reach the cost tier", async () => {
 		const handlers = new Map<string, (...args: any[]) => any>();
 		const pi = {
+			events: createEventBus(),
 			getFlag: () => undefined,
 			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
 			registerFlag: () => undefined,
@@ -67,6 +68,7 @@ describe("context hints", () => {
 	test("shows the percentage when the token count is unavailable", async () => {
 		const handlers = new Map<string, (...args: any[]) => any>();
 		const pi = {
+			events: createEventBus(),
 			getFlag: () => undefined,
 			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
 			registerFlag: () => undefined,
@@ -210,6 +212,7 @@ describe("configured compaction models", () => {
 			},
 		};
 		const pi = {
+			events: createEventBus(),
 			getFlag: (name: string) => (name === "compaction-model" ? "custom/summary" : undefined),
 			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
 			registerFlag: () => undefined,
@@ -269,6 +272,7 @@ describe("compact tool lifecycle", () => {
 		let tool: any;
 		const { default: registerExtension } = await import("./index");
 		registerExtension({
+			events: createEventBus(),
 			getFlag: () => undefined,
 			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
 			registerFlag: () => undefined,
@@ -296,6 +300,7 @@ describe("compact tool lifecycle", () => {
 		const sentMessages: string[] = [];
 		let tool: any;
 		const pi = {
+			events: createEventBus(),
 			getFlag: () => undefined,
 			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
 			registerFlag: () => undefined,
@@ -362,6 +367,7 @@ describe("compact tool lifecycle", () => {
 		const sentMessages: string[] = [];
 		let tool: any;
 		const pi = {
+			events: createEventBus(),
 			getFlag: () => undefined,
 			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
 			registerFlag: () => undefined,
@@ -395,6 +401,7 @@ describe("compact tool lifecycle", () => {
 		let idle = false;
 		let tool: any;
 		const pi = {
+			events: createEventBus(),
 			getFlag: () => undefined,
 			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
 			registerFlag: () => undefined,
@@ -444,6 +451,7 @@ describe("compact tool lifecycle", () => {
 		const sentMessages: string[] = [];
 		let tool: any;
 		const pi = {
+			events: createEventBus(),
 			getFlag: () => undefined,
 			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
 			registerFlag: () => undefined,
@@ -480,6 +488,7 @@ describe("compact tool lifecycle", () => {
 		const sentMessages: string[] = [];
 		let tool: any;
 		const pi = {
+			events: createEventBus(),
 			getFlag: () => undefined,
 			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
 			registerFlag: () => undefined,
@@ -512,6 +521,7 @@ describe("compact tool lifecycle", () => {
 		const sentMessages: string[] = [];
 		let tool: any;
 		const pi = {
+			events: createEventBus(),
 			getFlag: () => undefined,
 			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
 			registerFlag: () => undefined,
@@ -556,6 +566,7 @@ describe("compact tool lifecycle", () => {
 		// dispatch is dropped (no matching startup hook fires); the second
 		// delivers and acknowledges its specific custom message.
 		const pi = {
+			events: createEventBus(),
 			getFlag: () => undefined,
 			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
 			registerFlag: () => undefined,
@@ -622,6 +633,7 @@ describe("compact tool lifecycle", () => {
 		const sentMessages: string[] = [];
 		let tool: any;
 		const pi = {
+			events: createEventBus(),
 			getFlag: () => undefined,
 			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
 			registerFlag: () => undefined,
@@ -654,6 +666,7 @@ describe("compact tool lifecycle", () => {
 		const sentMessages: string[] = [];
 		let tool: any;
 		const pi = {
+			events: createEventBus(),
 			getFlag: () => undefined,
 			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
 			registerFlag: () => undefined,
@@ -697,6 +710,7 @@ describe("compact tool lifecycle", () => {
 		const sentMessages: string[] = [];
 		let tool: any;
 		const pi = {
+			events: createEventBus(),
 			getFlag: () => undefined,
 			on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => void) => handlers.set(event, handler),
 			registerFlag: () => undefined,

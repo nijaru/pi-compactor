@@ -322,6 +322,16 @@ export default function (pi: ExtensionAPI) {
 		type: "string",
 	});
 
+	// getFlag is scoped to the registering extension. Other compaction providers
+	// must ask us for effective policy rather than reading our flag themselves.
+	pi.events.on("pi-compactor:resolve-model-policy", (request) => {
+		if (typeof request !== "object" || request === null) return;
+		const { context, respond } = request as { context?: ExtensionContext; respond?: unknown };
+		if (typeof respond !== "function" || typeof context !== "object" || context === null) return;
+		if (typeof context.cwd !== "string" || typeof context.isProjectTrusted !== "function") return;
+		respond(readModelSelectors(pi, context).length > 0);
+	});
+
 	pi.on("session_before_compact", async (event, ctx) => {
 		// Claim only the first manual compaction event after ctx.compact starts.
 		// A later manual event is a competing /compact request; cancel it rather

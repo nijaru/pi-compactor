@@ -1,5 +1,5 @@
 import { afterEach, expect, jest, test } from "bun:test";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createEventBus, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import register, { RESUME_ACK_TIMEOUT_MS } from "./index";
 
 const cleanup: Array<() => void> = [];
@@ -16,6 +16,7 @@ async function resumeFixture() {
 	let tool: any;
 	const ctx = { isIdle: () => idle, compact: (request: any) => requests.push(request) } as unknown as ExtensionContext;
 	register({
+		events: createEventBus(),
 		getFlag: () => undefined,
 		registerFlag: () => {},
 		registerTool: (definition: any) => { tool = definition; },

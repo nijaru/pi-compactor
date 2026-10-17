@@ -87,6 +87,30 @@ describe("context hints", () => {
 
 });
 
+test("a failed resume delivery does not block the next compact request", async () => {
+	const handlers = new Map<string, (...args: any[]) => any>();
+	let compactTool: { execute: (id: string, params: { continueAfterCompaction: boolean }) => Promise<unknown> } | undefined;
+	const pi = {
+		events: createEventBus(),
+		getFlag: () => undefined,
+		on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
+		registerFlag: () => undefined,
+		registerTool: (tool: typeof compactTool) => { compactTool = tool; },
+		sendMessage: () => { throw new Error("extension inactive"); },
+	} as unknown as ExtensionAPI;
+	const { default: registerExtension } = await import("./index");
+	registerExtension(pi);
+	await compactTool!.execute("1", { continueAfterCompaction: true });
+	const ctx = {
+		isIdle: () => true,
+		compact: ({ onComplete }: { onComplete: () => void }) => onComplete(),
+	} as unknown as ExtensionContext;
+	await handlers.get("agent_settled")!({ aborted: false }, ctx);
+	await expect(compactTool!.execute("2", { continueAfterCompaction: false })).resolves.toMatchObject({
+		content: [expect.objectContaining({ text: expect.stringContaining("no follow-up turn") })],
+	});
+});
+
 describe("model policy", () => {
 	test("honors the flag and trusted project precedence", async () => {
 		const directory = await mkdtemp(`${tmpdir()}/pi-compactor-`);

@@ -129,10 +129,18 @@ export default function (pi: ExtensionAPI) {
 		// Called within agent_settled: Pi queues this synchronously and awaits the
 		// new run after all settled handlers finish. No delivery timeout is needed:
 		// even slow settled/startup hooks remain owned by the original prompt().
-		pi.sendMessage(
-			{ customType: RESUME_CUSTOM_TYPE, content: message, display: false, details: { resumeId: pending.id } },
-			{ triggerTurn: true },
-		);
+		try {
+			pi.sendMessage(
+				{ customType: RESUME_CUSTOM_TYPE, content: message, display: false, details: { resumeId: pending.id } },
+				{ triggerTurn: true },
+			);
+		} catch (error) {
+			// sendMessage is fire-and-forget, but an inactive extension can still throw
+			// synchronously. Do not leave the in-flight guard set for the rest of the
+			// session when no resume turn can start.
+			pendingResume = undefined;
+			console.error(`[pi-compactor] failed to schedule resume: ${errorSummary(error)}`);
+		}
 	}
 
 	async function runCompaction(request: PendingCompaction, ctx: ExtensionContext): Promise<void> {
@@ -307,6 +315,10 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 	pi.on("agent_settled", async (event, ctx) => {
+		// A resume message clears this flag in before_agent_start. Anything still
+		// pending here belongs to a delivery that never started, so clear it rather
+		// than rejecting every later compact request.
+		pendingResume = undefined;
 		// A canceled run must not start deferred work. An already-started
 		// ctx.compact owns its completion/error callback.
 		if (event.aborted && pendingCompaction?.phase !== "compacting") {

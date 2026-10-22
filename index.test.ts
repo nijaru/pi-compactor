@@ -46,6 +46,8 @@ describe("context hints", () => {
 		const pi = {
 			events: createEventBus(),
 			getFlag: () => undefined,
+			getSettings: () => ({}),
+			registerCommand: () => undefined,
 			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
 			registerFlag: () => undefined,
 			registerTool: () => undefined,
@@ -68,6 +70,8 @@ describe("context hints", () => {
 		const pi = {
 			events: createEventBus(),
 			getFlag: () => undefined,
+			getSettings: () => ({}),
+			registerCommand: () => undefined,
 			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
 			registerFlag: () => undefined,
 			registerTool: () => undefined,
@@ -97,12 +101,17 @@ test("a failed resume delivery does not block the next compact request", async (
 		registerFlag: () => undefined,
 		registerTool: (tool: typeof compactTool) => { compactTool = tool; },
 		sendMessage: () => { throw new Error("extension inactive"); },
+		getSettings: () => ({ compactor: { cacheStatus: false } }),
+		registerCommand: () => undefined,
 	} as unknown as ExtensionAPI;
 	const { default: registerExtension } = await import("./index");
 	registerExtension(pi);
 	await compactTool!.execute("1", { continueAfterCompaction: true });
 	const ctx = {
 		isIdle: () => true,
+		hasPendingMessages: () => false,
+		sessionManager: { getSessionId: () => "test" },
+		ui: { setStatus: () => undefined },
 		compact: ({ onComplete }: { onComplete: () => void }) => onComplete(),
 	} as unknown as ExtensionContext;
 	await handlers.get("agent_settled")!({ aborted: false }, ctx);
@@ -236,6 +245,7 @@ describe("configured compaction models", () => {
 		const pi = {
 			events: createEventBus(),
 			getFlag: (name: string) => (name === "compaction-model" ? "custom/summary" : undefined),
+			registerCommand: () => undefined,
 			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
 			registerFlag: () => undefined,
 			registerTool: () => undefined,

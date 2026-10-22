@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
+import { IdleCacheExpiry } from "./expiry";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { compact } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -111,10 +113,20 @@ export default function (pi: ExtensionAPI) {
 		continueAfterCompaction: boolean;
 		phase: "awaiting-settlement" | "compacting";
 		owned?: boolean;
+		// Idle requests never resume. The scheduler invalidates this guard on input,
+		// model/tree changes, replacement, reload, or bare SDK disposal.
+		expiry?: () => boolean;
 	};
 	type PendingResume = { id: string };
 	let pendingCompaction: PendingCompaction | undefined;
 	let pendingResume: PendingResume | undefined;
+	let unregisterCleanup: (() => void) | undefined;
+	const expiry = new IdleCacheExpiry(pi, () => !!(pendingCompaction || pendingResume), async (ctx, isCurrent) => {
+		if (!isCurrent() || pendingCompaction || pendingResume || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+		const request: PendingCompaction = { continueAfterCompaction: false, phase: "compacting", expiry: isCurrent };
+		pendingCompaction = request;
+		await runCompaction(request, ctx);
+	});
 
 	function resetLifecycle(): void {
 		// Callback closures retain their request object. Clearing the reference
@@ -159,6 +171,13 @@ export default function (pi: ExtensionAPI) {
 			}
 		});
 		if (pendingCompaction !== request) return;
+		if (request.expiry) {
+			pendingCompaction = undefined;
+			// Let the companion's wrapper observe failure without logging provider
+			// payloads or entering the tool's recovery/resume path.
+			if (error) throw error;
+			return;
+		}
 		let message = RESUME_MESSAGE;
 		if (error && !/^already compacted$/i.test(error.message.trim())) {
 			console.error(`[pi-compactor] compaction failed: ${errorSummary(error)}`);
@@ -203,7 +222,7 @@ export default function (pi: ExtensionAPI) {
 
 		event.messages.push({
 			role: "user",
-			content: `[ctx ${usageLabel}]${marker}`,
+			content: `[ctx ${usageLabel}${expiry.hint(ctx)}]${marker}`,
 			timestamp: Date.now(),
 		});
 	});
@@ -225,6 +244,12 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
+		const idleRequest = pendingCompaction?.expiry;
+		if (idleRequest && (!idleRequest() || ctx.hasPendingMessages())) {
+			pendingCompaction = undefined;
+			return { cancel: true };
+		}
+		if (!idleRequest) expiry.stop("manual or Pi compaction");
 		// Claim only the first manual compaction event after ctx.compact starts.
 		// A later manual event is a competing /compact request; cancel it rather
 		// than letting two compactions mutate the session concurrently.
@@ -244,6 +269,9 @@ export default function (pi: ExtensionAPI) {
 		// observe it so behavior does not depend on extension registration order.
 		if (event.reason === "threshold" || event.reason === "overflow") pendingCompaction = undefined;
 
+		// The companion owns cached-only requests and must cancel on failure.
+		// Never race it with configured-model or default-fallback summarization.
+		if (idleRequest) return undefined;
 		const selectors = readModelSelectors(pi, ctx);
 
 		for (const selector of selectors) {
@@ -322,6 +350,7 @@ export default function (pi: ExtensionAPI) {
 		// A canceled run must not start deferred work. An already-started
 		// ctx.compact owns its completion/error callback.
 		if (event.aborted && pendingCompaction?.phase !== "compacting") {
+			expiry.stop("agent aborted");
 			resetLifecycle();
 			return;
 		}
@@ -332,19 +361,46 @@ export default function (pi: ExtensionAPI) {
 		if (pendingCompaction?.phase === "awaiting-settlement" && ctx.isIdle()) {
 			await runCompaction(pendingCompaction, ctx);
 		}
+		if (!event.aborted && !pendingCompaction && !pendingResume) expiry.start(ctx);
 	});
-	pi.on("session_start", () => {
+	pi.on("session_start", (_event, ctx) => {
 		resetThrottle();
 		resetLifecycle();
+		expiry.reset();
+		unregisterCleanup?.();
+		const sessionId = ctx.sessionManager.getSessionId();
+		unregisterCleanup = registerSessionResourceCleanup((id) => {
+			if (id !== undefined && id !== sessionId) return;
+			expiry.stop("session disposed");
+			resetLifecycle();
+			unregisterCleanup?.();
+			unregisterCleanup = undefined;
+		});
+		expiry.start(ctx);
 	});
+	// Invalidate expiry ownership without clearing an already-started request:
+	// its guard cancels at session_before_compact if input arrives in Pi's abort await.
+	pi.on("agent_start", () => expiry.stop("agent started"));
+	pi.on("input", () => { expiry.stop("input received"); });
+	pi.on("session_before_switch", () => { expiry.stop("session switching"); });
+	pi.on("session_before_fork", () => { expiry.stop("session forking"); });
+	pi.on("session_before_tree", () => { expiry.stop("tree navigation"); });
 	pi.on("session_tree", () => {
+		expiry.stop("tree changed");
 		resetThrottle();
 		resetLifecycle();
 	});
-	pi.on("model_select", resetThrottle);
+	pi.on("model_select", () => { expiry.stop("model changed"); resetThrottle(); });
 	pi.on("session_shutdown", () => {
+		expiry.stop("session shutdown");
+		unregisterCleanup?.();
+		unregisterCleanup = undefined;
 		resetThrottle();
 		resetLifecycle();
+	});
+	pi.registerCommand("compactor-status", {
+		description: "Show cache-expiry preferences and the last scheduling decision",
+		handler: async (_args, ctx) => { ctx.ui.notify(expiry.status(ctx), "info"); },
 	});
 
 	// ── Compact tool ─────────────────────────────────────────────────────

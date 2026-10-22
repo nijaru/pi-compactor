@@ -8,10 +8,17 @@ function fixture() {
 	const messages: any[] = [];
 	let idle = true;
 	let tool: any;
-	const ctx = { isIdle: () => idle, compact: (request: any) => { requests.push(request); } } as unknown as ExtensionContext;
+	const ctx = {
+		isIdle: () => idle, hasPendingMessages: () => false,
+		ui: { setStatus: () => undefined },
+		sessionManager: { getSessionId: () => "resume-test" },
+		compact: (request: any) => { requests.push(request); },
+	} as unknown as ExtensionContext;
 	register({
 		events: createEventBus(),
 		getFlag: () => undefined,
+		getSettings: () => ({ compactor: { cacheStatus: false } }),
+		registerCommand: () => undefined,
 		registerFlag: () => {},
 		registerTool: (definition: any) => { tool = definition; },
 		on: (name: string, handler: any) => handlers.set(name, handler),

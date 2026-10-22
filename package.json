@@ -32,6 +32,7 @@
   "files": [
     "index.ts",
     "policy.ts",
+    "expiry.ts",
     "README.md",
     "LICENSE"
   ],
@@ -41,6 +42,7 @@
     "check": "bun test && bun run typecheck"
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   }

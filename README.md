@@ -4,7 +4,7 @@ Pi extension that lets the LLM manage its own context compaction. The model deci
 
 ## Installation
 
-Requires Pi 1.2.0 or later, which identifies custom-message runs during startup.
+Requires Pi 1.2.0 or later. Development checks target Pi 1.4.0.
 
 ```bash
 pi install npm:@nijaru/pi-compactor
@@ -16,7 +16,7 @@ pi install npm:@nijaru/pi-compactor
 2. The model calls the `compact` tool at a genuine task boundary, with optional preservation instructions and an explicit `continueAfterCompaction` choice.
 3. Pi reloads the session with the summary. If unfinished work remains or a final response is needed, the extension starts one hidden recovery turn after the active run settles; otherwise it stops without creating extra work.
 
-The first hint is at 50% for context windows up to 128k, or about 128k tokens for larger windows. Later hints are throttled by both percentage and token deltas. A `[>200k]` marker indicates that the context has crossed the higher-cost range; it does not trigger compaction. Pi's own automatic threshold is controlled by `compaction.reserveTokens` in Pi's `settings.json`; this extension does not add another threshold.
+The first hint is at 50% for context windows up to 128k, or about 128k tokens for larger windows. Later hints are throttled by both percentage and token deltas. A `[>200k]` marker indicates that the context has crossed the higher-cost range; it does not trigger compaction. Pi's own automatic threshold is controlled by `compaction.reserveTokens` in Pi's `settings.json`; this extension does not add another context-pressure trigger.
 
 ## Configuration
 
@@ -45,6 +45,29 @@ The project file is `<pi-config-dir>/compaction-policy.json` (normally `.pi/comp
 4. Pi's default compaction model
 
 Configured models are retried only for transient failures. Empty summaries, permanent failures, invalid selectors, and missing authentication fall back to the next configured model and finally Pi's default. When the companion [`pi-provider-compaction`](https://github.com/nijaru/pi-provider-compaction) extension is installed, leave `compaction-model` unset so its provider-native adapter can own the saved compaction details. Without a provider-native adapter, Pi's default compaction path remains available.
+
+### Cache-aware idle compaction
+
+With a compatible `pi-provider-compaction` companion, pi-compactor can show a cache countdown and optionally compact shortly before estimated cache expiry. Configure the top-level `compactor` object in Pi's `settings.json`:
+
+```json
+{
+  "compactor": {
+    "compactBeforeExpiry": false,
+    "leadTimeSeconds": 30,
+    "minContextTokens": 50000,
+    "cacheStatus": true
+  }
+}
+```
+
+These are the defaults. `leadTimeSeconds` is bounded to 1–300; `minContextTokens` is a non-negative integer. Settings are read from Pi's merged settings at idle boundaries, during idle refresh, and by `/compactor-status`; the extension never writes them. Reload after editing settings files.
+
+`cacheStatus` controls the idle status countdown and optional cache information in ephemeral `[ctx]` hints. TTL is a **best-effort model estimate**, not a provider guarantee. Missing lifetime metadata stays unknown. `/compactor-status` shows effective preferences, cache availability, and the last scheduling reason, even without the companion.
+
+Pre-expiry compaction is off by default. When enabled, it runs only while idle, with no pending input or compaction/resume, and only if `compaction.enabled` is not false. It requires enough actual context tokens (or the companion's measured input usage), a prepared cached-summary path, observed cached usage, and a known, unexpired estimated TTL. Idle refresh tracks Pi's cache warmer; a newer warm cycle postpones the attempt. There is at most one attempt per cache cycle, with a final companion eligibility check. Missing companions, failures, and expired or unknown TTL never fall back to ordinary summarization.
+
+Idle expiry never starts a continuation. Normal model-driven task-boundary timing and the tool's explicit `continueAfterCompaction` choice are unchanged. Leave `compaction-model` unset for companion-native compaction.
 
 ## Development
 

@@ -30,8 +30,8 @@ class FakeClock implements ExpiryClock {
 	}
 }
 
-type Request = { context: ExtensionContext; cycle: string; run: () => Promise<void>; respond: (result: Promise<boolean>) => void };
-function fixture() {
+type Request = { context: ExtensionContext; cycle: string; isCurrent: () => boolean; run: () => Promise<boolean>; respond: (result: Promise<boolean>) => void };
+function fixture(compacted = true) {
 	const time = new FakeClock();
 	let state: CacheState = {
 		version: 1, cycle: "one", available: true, reason: "cached summary prepared",
@@ -55,9 +55,9 @@ function fixture() {
 		(value as { respond: (state: CacheState) => void }).respond(state);
 	});
 	const pi = { events, getSettings: () => settings } as Pick<ExtensionAPI, "events" | "getSettings">;
-	const scheduler = new IdleCacheExpiry(pi, () => blocked, async () => { runs++; }, time);
+	const scheduler = new IdleCacheExpiry(pi, () => blocked, async () => { runs++; return compacted; }, time);
 	let requests = 0;
-	let handler = (request: Request) => request.respond(request.run().then(() => true));
+	let handler = (request: Request) => request.respond(request.run());
 	const unsubscribe = events.on("pi-provider-compaction:compact-before-expiry", value => {
 		requests++;
 		handler(value as Request);
@@ -163,7 +163,7 @@ test.each(["input", "stop", "warm", "expiry", "manual"])("delayed provider autho
 	const f = fixture();
 	let release!: () => void;
 	const gate = new Promise<void>(resolve => { release = resolve; });
-	f.handler(request => request.respond(gate.then(request.run).then(() => true)));
+	f.handler(request => request.respond(gate.then(request.run)));
 	f.state({ expiresAt: f.time.now() + 10_000 });
 	f.start();
 	if (race === "input") f.pending(true);
@@ -193,6 +193,33 @@ test("failed or missing authorization never retries the same cycle", async () =>
 		expect(f.runs).toBe(0);
 		f.scheduler.stop("done");
 	}
+});
+
+test("the shared transaction guard permits its own busy state but revokes on input/settings", async () => {
+	const f = fixture();
+	let current!: () => boolean;
+	f.handler(request => { current = request.isCurrent; request.respond(request.run()); });
+	f.state({ expiresAt: f.time.now() + 10_000 });
+	f.start();
+	await flush();
+	f.idle(false); f.blocked(true);
+	expect(current()).toBe(true);
+	f.pending(true);
+	expect(current()).toBe(false);
+	f.pending(false);
+	f.settings({ compactor: { compactBeforeExpiry: false } });
+	expect(current()).toBe(false);
+	f.scheduler.stop("done");
+});
+
+test("an abandoned run is not reported as completed", async () => {
+	const f = fixture(false);
+	f.state({ expiresAt: f.time.now() + 10_000 });
+	f.start();
+	await flush();
+	expect(f.runs).toBe(1);
+	expect(f.scheduler.status(f.ctx)).toContain("companion declined or compaction failed");
+	f.scheduler.stop("done");
 });
 
 test("status cleanup survives SDK context invalidation", () => {

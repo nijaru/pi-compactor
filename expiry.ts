@@ -94,7 +94,7 @@ export class IdleCacheExpiry {
 	constructor(
 		private pi: Pick<ExtensionAPI, "events" | "getSettings">,
 		private blocked: () => boolean,
-		private run: (ctx: ExtensionContext, isCurrent: () => boolean) => Promise<void>,
+		private run: (ctx: ExtensionContext, isCurrent: () => boolean) => Promise<boolean>,
 		private time: ExpiryClock = clock,
 	) {}
 
@@ -199,20 +199,27 @@ export class IdleCacheExpiry {
 		this.pi.events.emit("pi-provider-compaction:compact-before-expiry", {
 			context: owner.context,
 			cycle: state.cycle,
+			// This guard remains valid during compaction: isIdle/blocked are only
+			// admission checks, since our own request makes the session busy.
+			isCurrent: () => {
+				if (!this.current(owner) || owner.context.hasPendingMessages()) return false;
+				this.refreshSettings();
+				return this.settings.compactBeforeExpiry && this.settings.compactionEnabled;
+			},
 			run: async () => {
 				// A companion may await preparation before running. Recheck both our
 				// ownership and its current cycle/TTL immediately before ctx.compact.
-				if (invoked) return;
+				if (invoked) return false;
 				invoked = true;
 				// respond() must happen synchronously, even if run() was called while
 				// evaluating its promise argument. No response means no authorization.
 				await Promise.resolve();
-				if (!result || !this.canRun(owner)) return;
+				if (!result || !this.canRun(owner)) return false;
 				this.refreshSettings();
 				const fresh = readCacheState(this.pi, owner.context);
-				if (fresh?.cycle !== state.cycle || this.eligibility(owner.context, fresh, false)) return;
-				ran = true;
-				await this.run(owner.context, () => this.current(owner));
+				if (fresh?.cycle !== state.cycle || this.eligibility(owner.context, fresh, false)) return false;
+				ran = await this.run(owner.context, () => this.current(owner));
+				return ran;
 			},
 			respond: (promise: Promise<boolean>) => {
 				const safe = Promise.resolve(promise);

@@ -122,10 +122,10 @@ export default function (pi: ExtensionAPI) {
 	let pendingResume: PendingResume | undefined;
 	let unregisterCleanup: (() => void) | undefined;
 	const expiry = new IdleCacheExpiry(pi, () => !!(pendingCompaction || pendingResume), async (ctx, isCurrent) => {
-		if (!isCurrent() || pendingCompaction || pendingResume || !ctx.isIdle() || ctx.hasPendingMessages()) return;
+		if (!isCurrent() || pendingCompaction || pendingResume || !ctx.isIdle() || ctx.hasPendingMessages()) return false;
 		const request: PendingCompaction = { continueAfterCompaction: false, phase: "compacting", expiry: isCurrent };
 		pendingCompaction = request;
-		await runCompaction(request, ctx);
+		return runCompaction(request, ctx);
 	});
 
 	function resetLifecycle(): void {
@@ -155,7 +155,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	async function runCompaction(request: PendingCompaction, ctx: ExtensionContext): Promise<void> {
+	async function runCompaction(request: PendingCompaction, ctx: ExtensionContext): Promise<boolean> {
 		request.phase = "compacting";
 		// ctx.compact is callback-based. Await its actual completion, not the
 		// session_compact event (which fires before Pi clears compaction state).
@@ -170,25 +170,26 @@ export default function (pi: ExtensionAPI) {
 				resolve(error instanceof Error ? error : new Error(String(error)));
 			}
 		});
-		if (pendingCompaction !== request) return;
+		if (pendingCompaction !== request) return false;
 		if (request.expiry) {
 			pendingCompaction = undefined;
 			// Let the companion's wrapper observe failure without logging provider
 			// payloads or entering the tool's recovery/resume path.
 			if (error) throw error;
-			return;
+			return true;
 		}
 		let message = RESUME_MESSAGE;
 		if (error && !/^already compacted$/i.test(error.message.trim())) {
 			console.error(`[pi-compactor] compaction failed: ${errorSummary(error)}`);
 			if (error.name === "AbortError" || /cancelled/i.test(error.message)) {
 				pendingCompaction = undefined;
-				return;
+				return false;
 			}
 			message = RESUME_AFTER_FAILURE_MESSAGE;
 		}
 		pendingCompaction = undefined;
 		if (request.continueAfterCompaction) dispatchResume(message);
+		return !error;
 	}
 
 	pi.on("before_agent_start", (event) => {

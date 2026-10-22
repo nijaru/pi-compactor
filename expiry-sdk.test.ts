@@ -60,14 +60,13 @@ async function fixture(options: Options = {}) {
 				&& request.context.model?.id === bound?.model) request.respond(state);
 		});
 		pi.events.on("pi-provider-compaction:compact-before-expiry", value => {
-			const request = value as { cycle: string; context: ExtensionContext; run: () => Promise<void>; respond: (value: Promise<boolean>) => void };
+			const request = value as { cycle: string; context: ExtensionContext; isCurrent: () => boolean; run: () => Promise<boolean>; respond: (value: Promise<boolean>) => void };
 			counts.requests++;
 			request.respond((async () => {
 				if (options.hold) await gate.promise;
 				try {
-					if (!state.available || request.cycle !== state.cycle || !state.expiresAt || state.expiresAt <= Date.now()) return false;
-					await request.run();
-					return true;
+					if (!request.isCurrent() || !state.available || request.cycle !== state.cycle || !state.expiresAt || state.expiresAt <= Date.now()) return false;
+					return await request.run();
 				} catch { counts.failures++; return false; }
 			})());
 		});

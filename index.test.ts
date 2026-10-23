@@ -10,7 +10,8 @@ import {
 	isUsableCompactionResult,
 	readModelSelectors,
 	shouldInject,
-} from "./index";
+} from "./policy";
+import registerExtension from "./index";
 
 const temporaryDirectories: string[] = [];
 const projectConfigDir = (directory: string) => join(directory, CONFIG_DIR_NAME);
@@ -18,6 +19,22 @@ const projectConfigDir = (directory: string) => join(directory, CONFIG_DIR_NAME)
 afterEach(async () => {
 	await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
+
+function fixture(overrides: Partial<ExtensionAPI> = {}) {
+	const handlers = new Map<string, (...args: any[]) => any>();
+	let tool: any;
+	registerExtension({
+		events: createEventBus(),
+		getFlag: () => undefined,
+		getSettings: () => ({ compactor: { cacheStatus: false } }),
+		registerCommand: () => undefined,
+		registerFlag: () => undefined,
+		registerTool: (definition: any) => { tool = definition; },
+		on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
+		...overrides,
+	} as unknown as ExtensionAPI);
+	return { handlers, get tool() { return tool; } };
+}
 
 describe("context hints", () => {
 	test("uses a 50% floor for small windows and a token floor for large windows", () => {
@@ -41,72 +58,20 @@ describe("context hints", () => {
 		expect(shouldInject({ tokens: 65_000, percent: 50, contextWindow: 128_000 }, { tokens: 70_000, percent: 55 })).toBe(true);
 	});
 
-	test("appends the >200k marker once tokens reach the cost tier", async () => {
-		const handlers = new Map<string, (...args: any[]) => any>();
-		const pi = {
-			events: createEventBus(),
-			getFlag: () => undefined,
-			getSettings: () => ({}),
-			registerCommand: () => undefined,
-			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
-			registerFlag: () => undefined,
-			registerTool: () => undefined,
-		} as unknown as ExtensionAPI;
-		const { default: registerExtension } = await import("./index");
-		registerExtension(pi);
-
+	test.each([
+		{ usage: { tokens: 210_000, percent: 21, contextWindow: 1_000_000 }, text: "[ctx 210k/1.0m] [>200k]" },
+		{ usage: { tokens: null, percent: 64, contextWindow: 200_000 }, text: "[ctx ?/200k (64%)]" },
+	])("context hint conveys measured usage: $text", ({ usage, text }) => {
+		const { handlers } = fixture();
 		const event = { messages: [] as Array<{ content: string }> };
-		handlers.get("context")?.(event, {
-			getContextUsage: () => ({ tokens: 210_000, percent: 21, contextWindow: 1_000_000 }),
-		} as unknown as ExtensionContext);
-
-		expect(event.messages).toEqual([
-			expect.objectContaining({ content: "[ctx 210k/1.0m] [>200k]" }),
-		]);
+		handlers.get("context")!(event, { getContextUsage: () => usage });
+		expect(event.messages).toEqual([expect.objectContaining({ content: text })]);
 	});
-
-	test("shows the percentage when the token count is unavailable", async () => {
-		const handlers = new Map<string, (...args: any[]) => any>();
-		const pi = {
-			events: createEventBus(),
-			getFlag: () => undefined,
-			getSettings: () => ({}),
-			registerCommand: () => undefined,
-			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
-			registerFlag: () => undefined,
-			registerTool: () => undefined,
-		} as unknown as ExtensionAPI;
-		const { default: registerExtension } = await import("./index");
-		registerExtension(pi);
-
-		const event = { messages: [] as Array<{ content: string }> };
-		handlers.get("context")?.(event, {
-			getContextUsage: () => ({ tokens: null, percent: 64, contextWindow: 200_000 }),
-		} as unknown as ExtensionContext);
-
-		expect(event.messages).toEqual([
-			expect.objectContaining({ content: "[ctx ?/200k (64%)]" }),
-		]);
-	});
-
 });
 
 test("a failed resume delivery does not block the next compact request", async () => {
-	const handlers = new Map<string, (...args: any[]) => any>();
-	let compactTool: { execute: (id: string, params: { continueAfterCompaction: boolean }) => Promise<unknown> } | undefined;
-	const pi = {
-		events: createEventBus(),
-		getFlag: () => undefined,
-		on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
-		registerFlag: () => undefined,
-		registerTool: (tool: typeof compactTool) => { compactTool = tool; },
-		sendMessage: () => { throw new Error("extension inactive"); },
-		getSettings: () => ({ compactor: { cacheStatus: false } }),
-		registerCommand: () => undefined,
-	} as unknown as ExtensionAPI;
-	const { default: registerExtension } = await import("./index");
-	registerExtension(pi);
-	await compactTool!.execute("1", { continueAfterCompaction: true });
+	const f = fixture({ sendMessage: () => { throw new Error("extension inactive"); } });
+	await f.tool.execute("1", { continueAfterCompaction: true });
 	const ctx = {
 		isIdle: () => true,
 		hasPendingMessages: () => false,
@@ -114,8 +79,8 @@ test("a failed resume delivery does not block the next compact request", async (
 		ui: { setStatus: () => undefined },
 		compact: ({ onComplete }: { onComplete: () => void }) => onComplete(),
 	} as unknown as ExtensionContext;
-	await handlers.get("agent_settled")!({ aborted: false }, ctx);
-	await expect(compactTool!.execute("2", { continueAfterCompaction: false })).resolves.toMatchObject({
+	await f.handlers.get("agent_settled")!({ aborted: false }, ctx);
+	await expect(f.tool.execute("2", { continueAfterCompaction: false })).resolves.toMatchObject({
 		content: [expect.objectContaining({ text: expect.stringContaining("no follow-up turn") })],
 	});
 });
@@ -208,8 +173,9 @@ describe("compaction safety helpers", () => {
 });
 
 describe("configured compaction models", () => {
-	test("uses the composed provider and preserves resolved endpoint/auth", async () => {
-		const handlers = new Map<string, (...args: any[]) => any>();
+	test.each([{ aborted: false }, { aborted: true }])("configured model preserves auth and cancellation (abort=$aborted)", async ({ aborted }) => {
+		const { handlers } = fixture({ getFlag: () => "custom/summary" });
+		const controller = new AbortController();
 		const streamCalls: Array<{ model: any; options: any }> = [];
 		const model = {
 			provider: "custom",
@@ -242,27 +208,19 @@ describe("configured compaction models", () => {
 				};
 			},
 		};
-		const pi = {
-			events: createEventBus(),
-			getFlag: (name: string) => (name === "compaction-model" ? "custom/summary" : undefined),
-			registerCommand: () => undefined,
-			on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
-			registerFlag: () => undefined,
-			registerTool: () => undefined,
-		} as unknown as ExtensionAPI;
-		const { default: registerExtension } = await import("./index");
-		registerExtension(pi);
-
 		const context = {
 			modelRegistry: {
 				find: () => model,
-				getApiKeyAndHeaders: async () => ({
-					ok: true,
-					apiKey: "resolved-key",
-					headers: { "x-test": "value", "x-delete": null },
-					baseUrl: "https://resolved.example/v1",
-					env: { REGION: "test" },
-				}),
+				getApiKeyAndHeaders: async () => {
+					if (aborted) controller.abort();
+					return {
+						ok: true,
+						apiKey: "resolved-key",
+						headers: { "x-test": "value", "x-delete": null },
+						baseUrl: "https://resolved.example/v1",
+						env: { REGION: "test" },
+					};
+				},
 				getProvider: () => provider,
 			},
 		} as unknown as ExtensionContext;
@@ -270,7 +228,7 @@ describe("configured compaction models", () => {
 		const result = await beforeCompact!({
 			reason: "manual",
 			customInstructions: "preserve decisions",
-			signal: new AbortController().signal,
+			signal: controller.signal,
 			preparation: {
 				firstKeptEntryId: "keep",
 				messagesToSummarize: [{ role: "user", content: "old context", timestamp: Date.now() }],
@@ -282,6 +240,11 @@ describe("configured compaction models", () => {
 			},
 		}, context);
 
+		if (aborted) {
+			expect(result).toEqual({ cancel: true });
+			expect(streamCalls).toEqual([]);
+			return;
+		}
 		expect(result?.compaction.summary).toBe("runtime summary");
 		expect(streamCalls).toHaveLength(1);
 		expect(streamCalls[0].model.baseUrl).toBe("https://resolved.example/v1");

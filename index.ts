@@ -7,24 +7,12 @@ import { Type } from "typebox";
 import {
 	errorSummary,
 	formatTokens,
-	hintPercent,
 	isTransientError,
 	isUsableCompactionResult,
 	readModelSelectors,
 	safeForLog,
 	shouldInject,
 } from "./policy";
-
-export {
-	errorSummary,
-	formatTokens,
-	hintPercent,
-	isTransientError,
-	isUsableCompactionResult,
-	readModelSelectors,
-	shouldInject,
-} from "./policy";
-export type { ContextUsageLike } from "./policy";
 
 const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 1_000;
@@ -279,7 +267,9 @@ export default function (pi: ExtensionAPI) {
 			for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
 				// Resolve auth for every attempt so command-backed credentials and OAuth
 				// tokens can refresh after a transient request failure.
+				if (event.signal.aborted) return { cancel: true };
 				const resolved = await resolveOne(selector, ctx);
+				if (event.signal.aborted) return { cancel: true };
 				if (!resolved) break;
 
 				try {
@@ -432,8 +422,8 @@ export default function (pi: ExtensionAPI) {
 		executionMode: "sequential",
 		async execute(_toolCallId, params) {
 			if (pendingCompaction || pendingResume) {
-				// Pi derives a tool error from a thrown error; a returned `isError` field is
-				// ignored and would record the duplicate request as a successful result.
+				// Reject before accepting another request so the failed call cannot
+				// queue a second compaction.
 				throw new Error("Compaction is already in progress.");
 			}
 

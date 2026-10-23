@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import register from "./index";
 
-async function fixture(extra?: ExtensionFactory, extraFirst = false) {
+async function fixture(extra?: ExtensionFactory, { extraFirst = false, configuredModel = true } = {}) {
 	const directory = await mkdtemp(join(tmpdir(), "pi-compactor-lifecycle-sdk-"));
 	const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 1 } });
 	const resourceLoader = new DefaultResourceLoader({
@@ -23,7 +23,7 @@ async function fixture(extra?: ExtensionFactory, extraFirst = false) {
 	});
 	await resourceLoader.reload();
 	expect(resourceLoader.getExtensions().errors).toEqual([]);
-	resourceLoader.getExtensions().runtime.flagValues.set("compaction-model", "faux/faux-1");
+	if (configuredModel) resourceLoader.getExtensions().runtime.flagValues.set("compaction-model", "faux/faux-1");
 	const modelRuntime = await ModelRuntime.create({
 		credentials: new InMemoryCredentialStore(), modelsStore: new InMemoryModelsStore(),
 		modelsPath: null, refreshOnCreate: false,
@@ -39,8 +39,15 @@ async function fixture(extra?: ExtensionFactory, extraFirst = false) {
 	return { session, faux, errors, cleanup: async () => { session.dispose(); await rm(directory, { recursive: true, force: true }); } };
 }
 
-test.each([true, false])("SDK prompt owns compaction and requested continuation (%s)", async continueAfterCompaction => {
-	const f = await fixture();
+test.each([
+	{ continueAfterCompaction: true, configuredModel: true },
+	{ continueAfterCompaction: false, configuredModel: true },
+	{ continueAfterCompaction: true, configuredModel: false },
+])("SDK compaction preserves continuation intent: %j", async ({ continueAfterCompaction, configuredModel }) => {
+	const preparations: Array<string | undefined> = [];
+	const f = await fixture(pi => {
+		pi.on("session_before_compact", event => { preparations.push(event.customInstructions); });
+	}, { configuredModel });
 	try {
 		f.faux.setResponses([
 			fauxAssistantMessage(fauxToolCall("compact", { continueAfterCompaction }), { stopReason: "toolUse" }),
@@ -53,9 +60,14 @@ test.each([true, false])("SDK prompt owns compaction and requested continuation 
 		expect(f.session.isCompacting).toBe(false);
 		const resumes = f.session.messages.filter(message => message.role === "custom" && message.customType === "pi-compactor-resume");
 		expect(resumes).toHaveLength(continueAfterCompaction ? 1 : 0);
+		expect(preparations).toHaveLength(1);
 		if (continueAfterCompaction) {
-			expect(resumes[0]).toMatchObject({ display: false, content: "Resume only unfinished work; if none remains, give the final response and stop." });
+			expect(preparations[0]).toContain("Preserve the active user request");
+			expect(preparations[0]).toContain("pending implementation, verification, or delivery");
+			expect(resumes[0]).toMatchObject({ display: false, content: expect.stringContaining("a recap or handoff does not finish that work") });
 			expect(f.session.getLastAssistantText()).toBe("Final continuation completed.");
+		} else {
+			expect(preparations[0]).toBeUndefined();
 		}
 		expect(f.faux.state.callCount).toBe(continueAfterCompaction ? 3 : 2);
 		expect(f.errors).toEqual([]);
@@ -107,7 +119,7 @@ test.each([true, false])("SDK awaits busy startup hooks registered before compac
 			started();
 			await gate;
 		});
-	}, extraFirst);
+	}, { extraFirst });
 	let prompt: Promise<void> | undefined;
 	try {
 		f.faux.setResponses([

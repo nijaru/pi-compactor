@@ -13,8 +13,8 @@ pi install npm:@nijaru/pi-compactor
 ## How it works
 
 1. As context fills, pi-compactor injects a small usage hint such as `[ctx 128k/1m]`.
-2. The model calls the `compact` tool at a genuine task boundary, with optional preservation instructions and an explicit `continueAfterCompaction` choice.
-3. Pi reloads the session with the summary. If unfinished work remains or a final response is needed, the extension starts one hidden recovery turn after the active run settles; otherwise it stops without creating extra work.
+2. The model calls the `compact` tool at a verified task or phase boundary, with optional preservation instructions and an explicit `continueAfterCompaction` choice.
+3. Pi reloads the session with the summary. With `continueAfterCompaction: true`, the extension asks the summarizer to preserve the active request and remaining work, then starts a hidden recovery turn directing the model to take the next unfinished step—not merely recap. Pending checks and already-authorized delivery still count as work. If the task is complete, it gives the final response; if blocked, it reports the blocker or asks the necessary question. With `false`, no recovery turn starts.
 
 The first hint is at 50% for context windows up to 128k, or about 128k tokens for larger windows. Later hints are throttled by both percentage and token deltas. If the model declares tiered prices, a hint such as `[est. pricing tier >272k]` marks a crossed pricing threshold; large contexts alone do not imply higher rates or trigger compaction. Pi's own automatic threshold is controlled by `compaction.reserveTokens` in Pi's `settings.json`; this extension does not add another context-pressure trigger.
 

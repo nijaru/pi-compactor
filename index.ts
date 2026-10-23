@@ -18,9 +18,12 @@ import {
 const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 1_000;
 const RESUME_CUSTOM_TYPE = "pi-compactor-resume";
-const RESUME_MESSAGE = "Resume only unfinished work; if none remains, give the final response and stop.";
+const RESUME_MESSAGE =
+	"Resume the active user request. Treat any compaction summary as working context, not a response to send. If authorized work remains, take its next concrete step, including pending checks or authorized delivery; a recap or handoff does not finish that work. If the request is complete, give the final response and stop. If blocked or a consequential action needs permission, report the blocker or ask the necessary question.";
 const RESUME_AFTER_FAILURE_MESSAGE =
-	"Compaction failed; resume only unfinished work without compaction, then give the final response.";
+	`Compaction failed. Use the existing context without compacting again in this recovery turn. ${RESUME_MESSAGE}`;
+const CONTINUATION_CONTEXT =
+	"Preserve the active user request, its completion status, remaining authorized work, the next concrete action, and any blockers or missing permissions. Distinguish completed work from pending implementation, verification, or delivery. If only the final response remains, say so explicitly; do not invent more work. Compaction itself is not task completion.";
 
 type CompactionModel = Parameters<typeof compact>[1];
 type ResolvedModel = {
@@ -398,12 +401,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "compact",
 		label: "Compact",
-		description: "Trigger context compaction and choose whether a follow-up turn should run afterward.",
+		description: "Compact context and choose whether to continue the active user task afterward.",
 		promptSnippet: "Compact context yourself at task boundaries",
 		promptGuidelines: [
-			"DEFER mid-task: If you have a clear next step in the current work — a file to write, a change to verify, a bug to finish fixing — do NOT compact. A [ctx] hint is informational, not a trigger. Keep working.",
-			"Compact at genuine boundaries: the task is complete and verified, or you're switching to unrelated work. If no [ctx] hint has fired, you have room; don't bother.",
-			"Set continueAfterCompaction=true when unfinished work remains or a final response is still needed; set it false only when no follow-up turn should occur.",
+			"A [ctx] hint is informational, not a trigger. Finish the current edit, check, or bug-fix step before compacting; do not interrupt it merely to respond to a hint.",
+			"Compact at a completed, verified task or phase boundary. The overall user request may still have unfinished authorized work; preserve its goal, next action, and blockers. A checkpoint is not completion of the user request.",
+			"Set continueAfterCompaction=true to continue unfinished authorized work, including pending checks or authorized delivery, or give a still-needed final response. A recap or handoff alone does not complete unfinished work. Set false only when no follow-up turn should occur.",
 			"No user permission needed; this is your context management tool.",
 			"Include instructions for what to preserve: current task, changed files, decisions, blockers, and next command.",
 			"After compacting, re-read active files before continuing.",
@@ -416,7 +419,7 @@ export default function (pi: ExtensionAPI) {
 				}),
 			),
 			continueAfterCompaction: Type.Boolean({
-				description: "Set true when unfinished work remains or a final response is needed; false only when no follow-up turn should occur.",
+				description: "True resumes the active task from its next unfinished step, not just a recap; also use true for a still-needed final response. False starts no follow-up turn.",
 			}),
 		}),
 		executionMode: "sequential",
@@ -428,7 +431,9 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			pendingCompaction = {
-				instructions: params.instructions,
+				instructions: params.continueAfterCompaction
+					? [params.instructions, CONTINUATION_CONTEXT].filter(Boolean).join("\n\n")
+					: params.instructions,
 				continueAfterCompaction: params.continueAfterCompaction,
 				phase: "awaiting-settlement",
 			};

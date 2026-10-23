@@ -4,7 +4,7 @@ import register from "./index";
 
 function fixture() {
 	const handlers = new Map<string, (...args: any[]) => any>();
-	const requests: Array<{ onComplete: () => void; onError: (error: Error) => void }> = [];
+	const requests: Array<{ customInstructions?: string; onComplete: () => void; onError: (error: Error) => void }> = [];
 	const messages: any[] = [];
 	let idle = true;
 	let tool: any;
@@ -31,11 +31,13 @@ function fixture() {
 test("serializes compactions through completion and exact busy-startup acknowledgement", async () => {
 	const f = fixture();
 	expect(f.tool.executionMode).toBe("sequential");
-	await f.tool.execute("compact", { continueAfterCompaction: true });
+	await f.tool.execute("compact", { instructions: "Preserve the pending parser fix.", continueAfterCompaction: true });
 	expect(f.requests).toHaveLength(0);
 	await expect(f.tool.execute("duplicate", { continueAfterCompaction: true })).rejects.toThrow("already in progress");
 	const settled = f.emit("agent_settled");
 	expect(f.requests).toHaveLength(1);
+	expect(f.requests[0].customInstructions).toContain("Preserve the pending parser fix.");
+	expect(f.requests[0].customInstructions).toContain("pending implementation, verification, or delivery");
 	await f.emit("session_before_compact", { reason: "manual" });
 	expect(await f.emit("session_before_compact", { reason: "manual" })).toEqual({ cancel: true });
 	f.emit("session_compact");
@@ -74,6 +76,16 @@ test.each(["session_start", "session_tree", "session_shutdown"])("%s fences pend
 	await expect(f.tool.execute("next", { continueAfterCompaction: false })).resolves.toMatchObject({ terminate: true });
 });
 
+test("no-continuation compaction keeps caller instructions unchanged", async () => {
+	const f = fixture();
+	await f.tool.execute("compact", { instructions: "Keep the current parser state.", continueAfterCompaction: false });
+	const settled = f.emit("agent_settled");
+	expect(f.requests[0].customInstructions).toBe("Keep the current parser state.");
+	f.requests[0].onComplete();
+	await settled;
+	expect(f.messages).toHaveLength(0);
+});
+
 test("aborted settlement discards a tool request before compaction starts", async () => {
 	const f = fixture();
 	await f.tool.execute("compact", { continueAfterCompaction: true });
@@ -105,15 +117,20 @@ test("a saved competing compaction invalidates an unowned callback", async () =>
 });
 
 test.each([
-	{ error: new Error("Already compacted"), resume: "Resume only unfinished work; if none remains, give the final response and stop." },
-	{ error: new Error("provider failed"), resume: "Compaction failed; resume only unfinished work without compaction, then give the final response." },
+	{ error: new Error("Already compacted"), resume: true, failed: false },
+	{ error: new Error("provider failed"), resume: true, failed: true },
 	{ error: new Error("Compaction cancelled"), resume: undefined },
 	{ error: Object.assign(new Error("aborted"), { name: "AbortError" }), resume: undefined },
-])("compaction outcome controls recovery: $error.message", async ({ error, resume }) => {
+])("compaction outcome controls recovery: $error.message", async ({ error, resume, failed }) => {
 	const f = fixture();
 	await f.tool.execute("compact", { continueAfterCompaction: true });
 	const settled = f.emit("agent_settled");
 	f.requests[0].onError(error);
 	await settled;
-	expect(f.messages.map(message => message.content)).toEqual(resume ? [resume] : []);
+	expect(f.messages).toHaveLength(resume ? 1 : 0);
+	if (resume) {
+		expect(f.messages[0].content).toContain("a recap or handoff does not finish that work");
+		expect(f.messages[0].content).toContain("authorized delivery");
+		if (failed) expect(f.messages[0].content).toContain("without compacting again in this recovery turn");
+	}
 });

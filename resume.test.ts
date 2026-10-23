@@ -17,7 +17,7 @@ function fixture() {
 	register({
 		events: createEventBus(),
 		getFlag: () => undefined,
-		getSettings: () => ({ compactor: { cacheStatus: false } }),
+		getSettings: () => ({}),
 		registerCommand: () => undefined,
 		registerFlag: () => {},
 		registerTool: (definition: any) => { tool = definition; },

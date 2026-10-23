@@ -16,7 +16,6 @@ export interface ExpirySettings {
 	compactBeforeExpiry: boolean;
 	leadTimeSeconds: number;
 	minContextTokens: number;
-	cacheStatus: boolean;
 	compactionEnabled: boolean;
 }
 
@@ -30,7 +29,6 @@ export function readExpirySettings(settings: { compactor?: unknown; compaction?:
 			? Math.min(300, Math.max(1, value.leadTimeSeconds)) : 30,
 		minContextTokens: typeof value.minContextTokens === "number" && Number.isSafeInteger(value.minContextTokens) && value.minContextTokens >= 0
 			? value.minContextTokens : 50_000,
-		cacheStatus: typeof value.cacheStatus === "boolean" ? value.cacheStatus : true,
 		compactionEnabled: settings.compaction?.enabled !== false,
 	};
 }
@@ -55,17 +53,9 @@ export function readCacheState(pi: Pick<ExtensionAPI, "events">, context: Extens
 	return state;
 }
 
-export function cacheLabel(state: CacheState | undefined, now = Date.now()): string {
-	if (!state) return "cache unavailable";
-	if (state.expiresAt === undefined) return "cache TTL unknown";
-	const seconds = Math.ceil((state.expiresAt - now) / 1_000);
-	return seconds > 0 ? `cache ~${seconds}s (estimated TTL)` : "cache estimated TTL expired";
-}
-
 // Poll only between runs: Pi's idle warmer can replace a cache cycle without an
 // extension lifecycle event. A fresh state read at every tick also handles sleep.
 const REFRESH_MS = 1_000;
-const STATUS_KEY = "pi-compactor-cache";
 type Timer = ReturnType<typeof setTimeout>;
 export interface ExpiryClock {
 	now(): number;
@@ -76,8 +66,6 @@ const clock: ExpiryClock = { now: Date.now, setTimeout: (fn, ms) => setTimeout(f
 
 type IdleOwner = {
 	context: ExtensionContext;
-	// Keep the cleanup capability, not a late read through an invalidated ctx.
-	ui: Pick<ExtensionContext["ui"], "setStatus">;
 	session: string;
 	model: string | undefined;
 };
@@ -88,7 +76,6 @@ export class IdleCacheExpiry {
 	private owner?: IdleOwner;
 	private timer?: Timer;
 	private attempted = new Set<string>();
-	private reason = "not started";
 	private settings = readExpirySettings({});
 
 	constructor(
@@ -100,25 +87,22 @@ export class IdleCacheExpiry {
 
 	private refreshSettings(): void { this.settings = readExpirySettings(this.pi.getSettings()); }
 
-	stop(reason: string): void {
+	private enabled(): boolean { return this.settings.compactBeforeExpiry && this.settings.compactionEnabled; }
+
+	stop(): void {
 		if (this.timer !== undefined) this.time.clearTimeout(this.timer);
 		this.timer = undefined;
-		const ui = this.owner?.ui;
 		this.owner = undefined;
-		this.reason = reason;
-		// Bare SDK dispose invalidates the context before resource cleanup.
-		try { ui?.setStatus(STATUS_KEY, undefined); } catch { /* UI already disposed */ }
 	}
 
 	reset(): void {
-		this.stop("session reset");
+		this.stop();
 		this.attempted.clear();
 	}
 
 	start(ctx: ExtensionContext): void {
-		this.stop("idle boundary");
-		this.refreshSettings();
-		const owner = { context: ctx, ui: ctx.ui, session: ctx.sessionManager.getSessionId(), model: modelKey(ctx) };
+		this.stop();
+		const owner = { context: ctx, session: ctx.sessionManager.getSessionId(), model: modelKey(ctx) };
 		this.owner = owner;
 		this.tick(owner);
 	}
@@ -138,62 +122,47 @@ export class IdleCacheExpiry {
 		this.timer.unref?.();
 	}
 
-	private eligibility(ctx: ExtensionContext, state: CacheState | undefined, attempted = true): string | undefined {
-		if (!this.settings.compactBeforeExpiry) return "pre-expiry compaction disabled";
-		if (!this.settings.compactionEnabled) return "compaction.enabled is false";
-		if (!state) return "companion unavailable";
-		if (!state.available) return state.reason;
-		if (state.expiresAt === undefined) return "cache TTL unknown";
-		if (state.expiresAt <= this.time.now()) return "estimated TTL expired";
-		if (state.cachedTokens <= 0) return "no cached usage";
+	private eligible(ctx: ExtensionContext, state: CacheState | undefined, attempted = true): boolean {
+		if (!this.enabled() || !state?.available || state.expiresAt === undefined
+			|| state.expiresAt <= this.time.now() || state.cachedTokens <= 0) return false;
 		const tokens = ctx.getContextUsage()?.tokens;
 		const actual = typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0 ? tokens : state.inputTokens;
-		if (actual < this.settings.minContextTokens) return "below minContextTokens";
-		if (attempted && this.attempted.has(state.cycle)) return "cycle already attempted";
-		return undefined;
+		return actual >= this.settings.minContextTokens && (!attempted || !this.attempted.has(state.cycle));
 	}
 
 	private tick(owner: IdleOwner): void {
 		if (!this.current(owner)) return;
+		this.refreshSettings();
+		if (!this.enabled()) {
+			this.stop();
+			return;
+		}
 		const ctx = owner.context;
 		if (!this.canRun(owner)) {
-			this.reason = "busy or pending work";
-			ctx.ui.setStatus(STATUS_KEY, undefined);
 			this.schedule(owner);
 			return;
 		}
-		this.refreshSettings();
 		const state = readCacheState(this.pi, ctx);
-		ctx.ui.setStatus(STATUS_KEY, this.settings.cacheStatus ? cacheLabel(state, this.time.now()) : undefined);
-		const reason = this.eligibility(ctx, state);
-		if (reason) {
-			this.reason = reason;
-			if (this.settings.cacheStatus || (this.settings.compactBeforeExpiry && this.settings.compactionEnabled)) this.schedule(owner);
+		if (!this.eligible(ctx, state)) {
+			this.schedule(owner);
 			return;
 		}
 		const delay = state!.expiresAt! - this.time.now() - this.settings.leadTimeSeconds * 1_000;
 		if (delay > 0) {
-			this.reason = "waiting for estimated expiry lead time";
 			this.schedule(owner, Math.min(REFRESH_MS, delay));
 			return;
 		}
 		// Consume before emitting: failed, declined, and missing listeners must not
 		// retry this cycle. Only a successful newer request/warm grants another try.
 		this.attempted.add(state!.cycle);
-		ctx.ui.setStatus(STATUS_KEY, undefined);
-		this.reason = "requesting cached-only compaction";
 		void this.fire(owner, state!).catch(() => {
 			// No request/error text: provider failures can contain private payloads.
-			if (this.current(owner)) {
-				this.reason = "pre-expiry compaction failed";
-				this.schedule(owner);
-			}
+			this.schedule(owner);
 		});
 	}
 
 	private async fire(owner: IdleOwner, state: CacheState): Promise<void> {
 		let result: Promise<boolean> | undefined;
-		let ran = false;
 		let invoked = false;
 		let responding = true;
 		this.pi.events.emit("pi-provider-compaction:compact-before-expiry", {
@@ -204,7 +173,7 @@ export class IdleCacheExpiry {
 			isCurrent: () => {
 				if (!this.current(owner) || owner.context.hasPendingMessages()) return false;
 				this.refreshSettings();
-				return this.settings.compactBeforeExpiry && this.settings.compactionEnabled;
+				return this.enabled();
 			},
 			run: async () => {
 				// A companion may await preparation before running. Recheck both our
@@ -217,9 +186,8 @@ export class IdleCacheExpiry {
 				if (!result || !this.canRun(owner)) return false;
 				this.refreshSettings();
 				const fresh = readCacheState(this.pi, owner.context);
-				if (fresh?.cycle !== state.cycle || this.eligibility(owner.context, fresh, false)) return false;
-				ran = await this.run(owner.context, () => this.current(owner));
-				return ran;
+				if (fresh?.cycle !== state.cycle || !this.eligible(owner.context, fresh, false)) return false;
+				return this.run(owner.context, () => this.current(owner));
 			},
 			respond: (promise: Promise<boolean>) => {
 				const safe = Promise.resolve(promise);
@@ -229,27 +197,7 @@ export class IdleCacheExpiry {
 			},
 		});
 		responding = false;
-		const accepted = result ? await result : false;
-		if (!this.current(owner)) return;
-		this.reason = accepted && ran ? "pre-expiry compaction completed" : "companion declined or compaction failed";
+		if (result) await result;
 		this.schedule(owner);
-	}
-
-	hint(ctx: ExtensionContext): string {
-		this.refreshSettings();
-		if (!this.settings.cacheStatus) return "";
-		const state = readCacheState(this.pi, ctx);
-		// Don't expand every context hint when the companion is absent.
-		return state ? `; ${cacheLabel(state, this.time.now())}` : "";
-	}
-
-	status(ctx: ExtensionContext): string {
-		this.refreshSettings();
-		const state = readCacheState(this.pi, ctx);
-		return [
-			`compactor: ${JSON.stringify(this.settings)}`,
-			`Cache: ${cacheLabel(state, this.time.now())}; ${state?.reason ?? "companion unavailable"}`,
-			`Last scheduling reason: ${this.reason}`,
-		].join("\n");
 	}
 }

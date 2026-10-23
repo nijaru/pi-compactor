@@ -212,7 +212,7 @@ export default function (pi: ExtensionAPI) {
 
 		event.messages.push({
 			role: "user",
-			content: `[ctx ${usageLabel}${expiry.hint(ctx)}]${marker}`,
+			content: `[ctx ${usageLabel}]${marker}`,
 			timestamp: Date.now(),
 		});
 	});
@@ -239,7 +239,7 @@ export default function (pi: ExtensionAPI) {
 			pendingCompaction = undefined;
 			return { cancel: true };
 		}
-		if (!idleRequest) expiry.stop("manual or Pi compaction");
+		if (!idleRequest) expiry.stop();
 		// Claim only the first manual compaction event after ctx.compact starts.
 		// A later manual event is a competing /compact request; cancel it rather
 		// than letting two compactions mutate the session concurrently.
@@ -345,7 +345,7 @@ export default function (pi: ExtensionAPI) {
 		// A canceled run must not start deferred work. An already-started
 		// ctx.compact owns its completion/error callback.
 		if (event.aborted && pendingCompaction?.phase !== "compacting") {
-			expiry.stop("agent aborted");
+			expiry.stop();
 			resetLifecycle();
 			return;
 		}
@@ -366,7 +366,7 @@ export default function (pi: ExtensionAPI) {
 		const sessionId = ctx.sessionManager.getSessionId();
 		unregisterCleanup = registerSessionResourceCleanup((id) => {
 			if (id !== undefined && id !== sessionId) return;
-			expiry.stop("session disposed");
+			expiry.stop();
 			resetLifecycle();
 			unregisterCleanup?.();
 			unregisterCleanup = undefined;
@@ -375,27 +375,23 @@ export default function (pi: ExtensionAPI) {
 	});
 	// Invalidate expiry ownership without clearing an already-started request:
 	// its guard cancels at session_before_compact if input arrives in Pi's abort await.
-	pi.on("agent_start", () => expiry.stop("agent started"));
-	pi.on("input", () => { expiry.stop("input received"); });
-	pi.on("session_before_switch", () => { expiry.stop("session switching"); });
-	pi.on("session_before_fork", () => { expiry.stop("session forking"); });
-	pi.on("session_before_tree", () => { expiry.stop("tree navigation"); });
+	pi.on("agent_start", () => expiry.stop());
+	pi.on("input", () => { expiry.stop(); });
+	pi.on("session_before_switch", () => { expiry.stop(); });
+	pi.on("session_before_fork", () => { expiry.stop(); });
+	pi.on("session_before_tree", () => { expiry.stop(); });
 	pi.on("session_tree", () => {
-		expiry.stop("tree changed");
+		expiry.stop();
 		resetThrottle();
 		resetLifecycle();
 	});
-	pi.on("model_select", () => { expiry.stop("model changed"); resetThrottle(); });
+	pi.on("model_select", () => { expiry.stop(); resetThrottle(); });
 	pi.on("session_shutdown", () => {
-		expiry.stop("session shutdown");
+		expiry.stop();
 		unregisterCleanup?.();
 		unregisterCleanup = undefined;
 		resetThrottle();
 		resetLifecycle();
-	});
-	pi.registerCommand("compactor-status", {
-		description: "Show cache-expiry preferences and the last scheduling decision",
-		handler: async (_args, ctx) => { ctx.ui.notify(expiry.status(ctx), "info"); },
 	});
 
 	// ── Compact tool ─────────────────────────────────────────────────────

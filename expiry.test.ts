@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createEventBus, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { cacheLabel, IdleCacheExpiry, readExpirySettings, type CacheState, type ExpiryClock } from "./expiry";
+import { IdleCacheExpiry, readExpirySettings, type CacheState, type ExpiryClock } from "./expiry";
 
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 
@@ -78,18 +78,18 @@ function fixture(compacted = true) {
 }
 
 test("expiry settings are opt-in, typed, bounded preferences", () => {
-	expect(readExpirySettings({})).toEqual({ compactBeforeExpiry: false, leadTimeSeconds: 30, minContextTokens: 50_000, cacheStatus: true, compactionEnabled: true });
+	expect(readExpirySettings({})).toEqual({ compactBeforeExpiry: false, leadTimeSeconds: 30, minContextTokens: 50_000, compactionEnabled: true });
 	for (const [value, expected] of [[-4, 1], [900, 300], [NaN, 30], [Infinity, 30], ["1", 30]]) {
 		expect(readExpirySettings({ compactor: { leadTimeSeconds: value } }).leadTimeSeconds).toBe(expected as number);
 	}
-	expect(readExpirySettings({ compactor: { compactBeforeExpiry: "true", minContextTokens: -1, cacheStatus: false }, compaction: { enabled: false } }))
-		.toMatchObject({ compactBeforeExpiry: false, minContextTokens: 50_000, cacheStatus: false, compactionEnabled: false });
+	expect(readExpirySettings({ compactor: { compactBeforeExpiry: "true", minContextTokens: -1 }, compaction: { enabled: false } }))
+		.toMatchObject({ compactBeforeExpiry: false, minContextTokens: 50_000, compactionEnabled: false });
 });
 
 test("warmer cycles postpone idle expiry, then compact exactly once per cycle", async () => {
 	const f = fixture();
 	f.start();
-	expect(f.status).toBe("cache ~60s (estimated TTL)");
+	expect(f.status).toBeUndefined();
 	await f.time.advance(29_000);
 	f.state({ cycle: "warm", expiresAt: f.time.now() + 60_000 });
 	await f.time.advance(29_000);
@@ -101,7 +101,7 @@ test("warmer cycles postpone idle expiry, then compact exactly once per cycle", 
 	f.state({ cycle: "new warm", expiresAt: f.time.now() + 10_000 });
 	await f.time.advance(1_000);
 	expect(f.runs).toBe(2);
-	f.scheduler.stop("done");
+	f.scheduler.stop();
 	expect(f.time.timers.size).toBe(0);
 	expect(f.status).toBeUndefined();
 });
@@ -123,7 +123,12 @@ test.each([
 	f.start();
 	await f.time.advance(20_000);
 	expect(f.requests).toBe(0);
-	f.scheduler.stop("done");
+	expect(f.status).toBeUndefined();
+	if (config !== undefined && (!config.compactBeforeExpiry || enabled === false)) {
+		expect(f.reads).toBe(0);
+		expect(f.time.timers.size).toBe(0);
+	}
+	f.scheduler.stop();
 });
 
 test("unknown actual usage can use the companion's measured input tokens", async () => {
@@ -133,7 +138,7 @@ test("unknown actual usage can use the companion's measured input tokens", async
 	f.start();
 	await flush();
 	expect(f.runs).toBe(1);
-	f.scheduler.stop("done");
+	f.scheduler.stop();
 });
 
 test("event-loop sleep past expiry never starts an expired request", async () => {
@@ -141,8 +146,8 @@ test("event-loop sleep past expiry never starts an expired request", async () =>
 	f.start();
 	await f.time.advance(70_000, true);
 	expect(f.requests).toBe(0);
-	expect(f.status).toContain("expired");
-	f.scheduler.stop("done");
+	expect(f.status).toBeUndefined();
+	f.scheduler.stop();
 });
 
 test.each(["pending", "busy", "compaction/resume"])("idle refresh does no cache work with %s", async condition => {
@@ -156,7 +161,7 @@ test.each(["pending", "busy", "compaction/resume"])("idle refresh does no cache 
 	f.pending(false); f.idle(true); f.blocked(false);
 	await f.time.advance(1_000);
 	expect(f.runs).toBe(1);
-	f.scheduler.stop("done");
+	f.scheduler.stop();
 });
 
 test.each(["input", "stop", "warm", "expiry", "manual"])("delayed provider authorization rechecks %s before run", async race => {
@@ -167,14 +172,14 @@ test.each(["input", "stop", "warm", "expiry", "manual"])("delayed provider autho
 	f.state({ expiresAt: f.time.now() + 10_000 });
 	f.start();
 	if (race === "input") f.pending(true);
-	if (race === "stop") f.scheduler.stop("agent started");
+	if (race === "stop") f.scheduler.stop();
 	if (race === "warm") f.state({ cycle: "warm", expiresAt: f.time.now() + 60_000 });
 	if (race === "expiry") await f.time.advance(11_000, true);
 	if (race === "manual") f.blocked(true);
 	release();
 	await flush();
 	expect(f.runs).toBe(0);
-	f.scheduler.stop("done");
+	f.scheduler.stop();
 });
 
 test("failed or missing authorization never retries the same cycle", async () => {
@@ -191,7 +196,7 @@ test("failed or missing authorization never retries the same cycle", async () =>
 		await f.time.advance(10_000);
 		expect(f.requests).toBe(response === "missing" ? 0 : 1);
 		expect(f.runs).toBe(0);
-		f.scheduler.stop("done");
+		f.scheduler.stop();
 	}
 });
 
@@ -209,37 +214,15 @@ test("the shared transaction guard permits its own busy state but revokes on inp
 	f.pending(false);
 	f.settings({ compactor: { compactBeforeExpiry: false } });
 	expect(current()).toBe(false);
-	f.scheduler.stop("done");
+	f.scheduler.stop();
 });
 
-test("an abandoned run is not reported as completed", async () => {
+test("a failed compaction never retries the same cache cycle", async () => {
 	const f = fixture(false);
-	f.state({ expiresAt: f.time.now() + 10_000 });
+	f.state({ expiresAt: f.time.now() + 20_000 });
 	f.start();
-	await flush();
+	await f.time.advance(10_000);
 	expect(f.runs).toBe(1);
-	expect(f.scheduler.status(f.ctx)).toContain("companion declined or compaction failed");
-	f.scheduler.stop("done");
-});
-
-test("status cleanup survives SDK context invalidation", () => {
-	const f = fixture();
-	f.start();
-	expect(f.status).toContain("estimated TTL");
-	Object.defineProperty(f.ctx, "ui", { get: () => { throw new Error("stale context"); } });
-	f.scheduler.stop("session disposed");
-	expect(f.status).toBeUndefined();
-	expect(f.time.timers.size).toBe(0);
-});
-
-test("status and ephemeral hints keep unknown TTL unknown and honor settings refresh", () => {
-	const f = fixture();
-	f.state({ expiresAt: undefined });
-	expect(f.scheduler.hint(f.ctx)).toContain("TTL unknown");
-	expect(f.scheduler.status(f.ctx)).toContain('"leadTimeSeconds":30');
-	f.settings({ compactor: { cacheStatus: false } });
-	expect(f.scheduler.hint(f.ctx)).toBe("");
-	f.events.clear();
-	expect(f.scheduler.status(f.ctx)).toContain("companion unavailable");
-	expect(cacheLabel(undefined)).toBe("cache unavailable");
+	expect(f.requests).toBe(1);
+	f.scheduler.stop();
 });

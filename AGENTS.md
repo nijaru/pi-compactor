@@ -19,7 +19,7 @@ Run `bun run check` (tests and typecheck). Pi loads the TypeScript source; there
 - Compaction requests pass Pi's resolved `ProviderHeaders` through unchanged. `null` deletes a provider default header, so filtering it out would silently restore a header the auth config disabled.
 - `index.ts` owns compaction and resume lifecycle; `policy.ts` owns pure task-boundary policy; `expiry.ts` owns idle cache observation and scheduling.
 - Task-boundary hint thresholds and tuning constants live in source with comments. Do not expose those thresholds as configuration.
-- Config covers the compaction model and the top-level `compactor` cache preferences (`compactBeforeExpiry`, `leadTimeSeconds`, `minContextTokens`, `cacheStatus`). Read merged Pi settings; do not modify live settings.
+- Config covers the compaction model and the top-level `compactor` cache preferences (`compactBeforeExpiry`, `leadTimeSeconds`, `minContextTokens`). Read merged Pi settings; do not modify live settings.
 - Test against real sessions. Threshold tuning requires observing actual context usage patterns.
 
 ## Don't

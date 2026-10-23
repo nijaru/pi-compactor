@@ -26,7 +26,7 @@ function fixture(overrides: Partial<ExtensionAPI> = {}) {
 	registerExtension({
 		events: createEventBus(),
 		getFlag: () => undefined,
-		getSettings: () => ({ compactor: { cacheStatus: false } }),
+		getSettings: () => ({}),
 		registerCommand: () => undefined,
 		registerFlag: () => undefined,
 		registerTool: (definition: any) => { tool = definition; },
@@ -35,6 +35,12 @@ function fixture(overrides: Partial<ExtensionAPI> = {}) {
 	} as unknown as ExtensionAPI);
 	return { handlers, get tool() { return tool; } };
 }
+
+test("compactor adds no slash commands", () => {
+	const commands: string[] = [];
+	fixture({ registerCommand: name => { commands.push(name); } });
+	expect(commands).toEqual([]);
+});
 
 describe("context hints", () => {
 	test("uses a 50% floor for small windows and a token floor for large windows", () => {
@@ -65,7 +71,12 @@ describe("context hints", () => {
 		{ usage: { tokens: 280_000, percent: 56, contextWindow: 500_000 }, cost: { tiers: [{ inputTokensAbove: 272_000 }] }, text: "[ctx 280k/500k] [est. pricing tier >272k]" },
 		{ usage: { tokens: null, percent: 64, contextWindow: 200_000 }, cost: undefined, text: "[ctx ?/200k (64%)]" },
 	])("context hint conveys measured usage: $text", ({ usage, cost, text }) => {
-		const { handlers } = fixture();
+		const events = createEventBus();
+		events.on("pi-provider-compaction:cache-state", (request: any) => request.respond({
+			version: 1, cycle: "warm", available: true, reason: "cached summary prepared",
+			expiresAt: Date.now() + 60_000, ttlSource: "model", cachedTokens: 60_000, inputTokens: 60_000,
+		}));
+		const { handlers } = fixture({ events });
 		const event = { messages: [] as Array<{ content: string }> };
 		handlers.get("context")!(event, { model: cost ? { cost } : undefined, getContextUsage: () => usage });
 		expect(event.messages).toEqual([expect.objectContaining({ content: text })]);

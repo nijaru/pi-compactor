@@ -212,6 +212,7 @@ describe("configured compaction models", () => {
 			},
 		};
 		const context = {
+			sessionManager: { getSessionId: () => "configured-summary-owner" },
 			modelRegistry: {
 				find: () => model,
 				getApiKeyAndHeaders: async () => {
@@ -254,6 +255,7 @@ describe("configured compaction models", () => {
 		expect(streamCalls[0].options).toMatchObject({
 			apiKey: "resolved-key",
 			env: { REGION: "test" },
+			sessionId: "configured-summary-owner",
 		});
 		// `null` deletes a provider default header; stripping it would silently
 		// restore the header the resolved auth config disabled.

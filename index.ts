@@ -295,6 +295,9 @@ export default function (pi: ExtensionAPI) {
 						undefined,
 						provider.streamSimple.bind(provider),
 						resolved.env,
+						undefined,
+						undefined,
+						ctx.sessionManager.getSessionId(),
 					);
 					if (!isUsableCompactionResult(result)) {
 						console.error(`[pi-compactor] ${safeForLog(selector)} returned an empty compaction summary`);

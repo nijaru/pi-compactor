@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { compact } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
+	contextPricingHint,
 	errorSummary,
 	formatTokens,
 	isTransientError,
@@ -202,9 +203,9 @@ export default function (pi: ExtensionAPI) {
 		throttle.tokens = tokens;
 		throttle.contextWindow = window;
 
-		// Usage data only. Labels like "context growing" prime reflexive
-		// compaction; the number is the signal. [>200k] flags a cost tier.
-		const marker = tokens >= 200_000 ? " [>200k]" : "";
+		// Neutral usage data, with a price-tier estimate only when the selected
+		// model declares one. A large context alone does not imply higher rates.
+		const marker = contextPricingHint(usage.tokens, ctx.model?.cost);
 		const usageLabel = usage.tokens !== null && Number.isFinite(usage.tokens)
 			? `${formatTokens(tokens)}/${formatTokens(window)}`
 			: `?/${formatTokens(window)}${usage.percent !== null && Number.isFinite(percent) ? ` (${Math.round(percent)}%)` : ""}`;

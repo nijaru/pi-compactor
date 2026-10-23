@@ -15,8 +15,8 @@ const MAX_MODEL_SELECTORS = 8;
 const MAX_SELECTOR_LENGTH = 512;
 
 // ── Context hint thresholds ─────────────────────────────────────────────
-// ≤128k: 50% (hardware-constrained windows, model handles full context fine)
-// >128k: 128k tokens (quality degradation zone, proactive before 200k price cliff)
+// Small windows: 50%; large windows: 128k tokens gives the model early notice
+// to choose a task boundary. This heuristic is not a model quality or price tier.
 export function hintPercent(window: number): number {
 	if (!Number.isFinite(window) || window <= 0) return 50;
 	if (window <= 128_000) return 50;
@@ -27,6 +27,14 @@ export function formatTokens(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
 	if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
 	return String(n);
+}
+
+/** Context usage estimates can flag a declared tier, never invent one. */
+export function contextPricingHint(tokens: number | null, cost: { tiers?: readonly { inputTokensAbove: number }[] } | undefined): string {
+	if (tokens === null) return "";
+	let threshold: number | undefined;
+	for (const tier of cost?.tiers ?? []) if (tokens > tier.inputTokensAbove) threshold = tier.inputTokensAbove;
+	return threshold === undefined ? "" : ` [est. pricing tier >${formatTokens(threshold)}]`;
 }
 
 export interface ContextUsageLike {

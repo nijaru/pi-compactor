@@ -59,12 +59,15 @@ describe("context hints", () => {
 	});
 
 	test.each([
-		{ usage: { tokens: 210_000, percent: 21, contextWindow: 1_000_000 }, text: "[ctx 210k/1.0m] [>200k]" },
-		{ usage: { tokens: null, percent: 64, contextWindow: 200_000 }, text: "[ctx ?/200k (64%)]" },
-	])("context hint conveys measured usage: $text", ({ usage, text }) => {
+		{ usage: { tokens: 210_000, percent: 21, contextWindow: 1_000_000 }, cost: undefined, text: "[ctx 210k/1.0m]" },
+		{ usage: { tokens: 210_000, percent: 42, contextWindow: 500_000 }, cost: { tiers: [{ inputTokensAbove: 272_000 }] }, text: "[ctx 210k/500k]" },
+		{ usage: { tokens: 272_000, percent: 54, contextWindow: 500_000 }, cost: { tiers: [{ inputTokensAbove: 272_000 }] }, text: "[ctx 272k/500k]" },
+		{ usage: { tokens: 280_000, percent: 56, contextWindow: 500_000 }, cost: { tiers: [{ inputTokensAbove: 272_000 }] }, text: "[ctx 280k/500k] [est. pricing tier >272k]" },
+		{ usage: { tokens: null, percent: 64, contextWindow: 200_000 }, cost: undefined, text: "[ctx ?/200k (64%)]" },
+	])("context hint conveys measured usage: $text", ({ usage, cost, text }) => {
 		const { handlers } = fixture();
 		const event = { messages: [] as Array<{ content: string }> };
-		handlers.get("context")!(event, { getContextUsage: () => usage });
+		handlers.get("context")!(event, { model: cost ? { cost } : undefined, getContextUsage: () => usage });
 		expect(event.messages).toEqual([expect.objectContaining({ content: text })]);
 	});
 });

@@ -1,6 +1,6 @@
 {
   "name": "@nijaru/pi-compactor",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Pi extension that gives the LLM a compact tool for context management",
   "type": "module",
   "license": "MIT",

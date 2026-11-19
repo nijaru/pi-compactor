@@ -26,8 +26,10 @@ const CONTINUATION_CONTEXT =
 	"Preserve the active user request, its completion status, remaining authorized work, the next concrete action, and any blockers or missing permissions. Distinguish completed work from pending implementation, verification, or delivery. If only the final response remains, say so explicitly; do not invent more work. Compaction itself is not task completion.";
 
 type CompactionModel = Parameters<typeof compact>[1];
+type CompactionStream = NonNullable<Parameters<typeof compact>[7]>;
 type ResolvedModel = {
 	model: CompactionModel;
+	stream: CompactionStream;
 	apiKey?: string;
 	// Pi's ProviderHeaders carry `null` to delete a provider default; keep them so a
 	// configured deletion still applies to the summary request.
@@ -53,7 +55,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<boolean> {
 	});
 }
 
-/** Resolve a single model selector to { model, apiKey, headers, env } via registry. */
+/** Resolve a model selector and choose the appropriate Pi dispatch path. */
 async function resolveOne(selector: string, ctx: ExtensionContext): Promise<ResolvedModel | undefined> {
 	const slash = selector.indexOf("/");
 	if (slash <= 0 || slash === selector.length - 1) {
@@ -74,15 +76,29 @@ async function resolveOne(selector: string, ctx: ExtensionContext): Promise<Reso
 			console.error(`[pi-compactor] model not found: ${safeForLog(selector)}`);
 			return undefined;
 		}
+		// Pi exposes no public isVirtualModel helper. The catalog marks virtual
+		// models with this API id; only registry dispatch runs their router.
+		// Let Pi resolve credentials for the routed physical model, not the alias.
+		if (model.api === "pi-virtual") {
+			return { model, stream: ctx.modelRegistry.streamSimple.bind(ctx.modelRegistry) };
+		}
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 		if (!auth.ok) {
 			// Auth errors may contain command-backed credential configuration. Do not log them.
 			console.error(`[pi-compactor] model auth failed for ${safeForLog(selector)}`);
 			return undefined;
 		}
+		// We already resolved this physical model's request options. Use the
+		// composed provider directly to avoid resolving them a second time.
+		const transport = ctx.modelRegistry.getProvider(model.provider);
+		if (!transport?.streamSimple) {
+			console.error(`[pi-compactor] provider unavailable for ${safeForLog(selector)}; trying next model`);
+			return undefined;
+		}
 		const requestModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
 		return {
 			model: requestModel,
+			stream: transport.streamSimple.bind(transport),
 			apiKey: auth.apiKey,
 			headers: auth.headers,
 			env: auth.env,
@@ -277,15 +293,6 @@ export default function (pi: ExtensionAPI) {
 				if (!resolved) break;
 
 				try {
-					const provider = ctx.modelRegistry.getProvider(resolved.model.provider);
-					if (!provider?.streamSimple) {
-						console.error(`[pi-compactor] provider unavailable for ${safeForLog(selector)}; trying next model`);
-						break;
-					}
-
-					// Use Pi's composed provider rather than @pi-ai/compat's global
-					// dispatcher. This preserves extension providers, resolved endpoints,
-					// and provider-specific request behavior for compaction calls.
 					// `compact` narrows headers to strings, but Pi's provider pipeline reads
 					// the same record and treats `null` as a deletion.
 					const result = await compact(
@@ -296,7 +303,7 @@ export default function (pi: ExtensionAPI) {
 						event.customInstructions,
 						event.signal,
 						undefined,
-						provider.streamSimple.bind(provider),
+						resolved.stream,
 						resolved.env,
 						undefined,
 						undefined,

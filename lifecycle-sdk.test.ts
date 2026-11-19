@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import register from "./index";
 
-async function fixture(extra?: ExtensionFactory, { extraFirst = false, configuredModel = true } = {}) {
+async function fixture(extra?: ExtensionFactory, { extraFirst = false, configuredModel = true, selector = "faux/faux-1" } = {}) {
 	const directory = await mkdtemp(join(tmpdir(), "pi-compactor-lifecycle-sdk-"));
 	const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false, keepRecentTokens: 1 } });
 	const resourceLoader = new DefaultResourceLoader({
@@ -23,13 +23,16 @@ async function fixture(extra?: ExtensionFactory, { extraFirst = false, configure
 	});
 	await resourceLoader.reload();
 	expect(resourceLoader.getExtensions().errors).toEqual([]);
-	if (configuredModel) resourceLoader.getExtensions().runtime.flagValues.set("compaction-model", "faux/faux-1");
+	if (configuredModel) resourceLoader.getExtensions().runtime.flagValues.set("compaction-model", selector);
 	const modelRuntime = await ModelRuntime.create({
 		credentials: new InMemoryCredentialStore(), modelsStore: new InMemoryModelsStore(),
 		modelsPath: null, refreshOnCreate: false,
 	});
 	const faux = fauxProvider();
+	// The router checks availability before dispatch, even for test transports.
+	faux.provider.auth.apiKey!.check = async () => ({ type: "api_key", source: "faux-test" });
 	modelRuntime.registerNativeProvider(faux.provider);
+	await modelRuntime.refresh({ allowNetwork: false, providers: [faux.provider.id] });
 	const { session } = await createAgentSession({
 		cwd: directory, agentDir: directory, model: faux.getModel(), modelRuntime, settingsManager,
 		sessionManager: SessionManager.inMemory(directory), resourceLoader, noTools: "builtin",
@@ -76,6 +79,33 @@ test.each([
 		// subsequently touch the invalidated context or start a late turn.
 		f.session.dispose();
 		await new Promise(resolve => setTimeout(resolve, 10));
+		expect(f.errors).toEqual([]);
+	} finally { await f.cleanup(); }
+});
+
+test("SDK compaction routes a configured virtual summary model", async () => {
+	const routes: string[] = [];
+	const f = await fixture(pi => {
+		pi.registerVirtualModel({
+			provider: "router", id: "summary", name: "Summary router",
+			route(request, ctx) {
+				routes.push(request.reason);
+				return { model: ctx.modelRegistry.find("faux", "faux-1")!, thinkingLevel: "off" };
+			},
+		});
+	}, { selector: "router/summary" });
+	try {
+		f.faux.setResponses([
+			fauxAssistantMessage("Finished the task."),
+			fauxAssistantMessage("Routed summary."),
+		]);
+		await f.session.prompt("Finish the task.");
+		await f.session.compact();
+		expect(routes).toEqual(["direct"]);
+		expect(f.session.sessionManager.getBranch().filter(entry => entry.type === "compaction")).toEqual([
+			expect.objectContaining({ fromHook: true, summary: expect.stringContaining("Routed summary.") }),
+		]);
+		expect(f.faux.state.callCount).toBe(2);
 		expect(f.errors).toEqual([]);
 	} finally { await f.cleanup(); }
 });

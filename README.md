@@ -4,7 +4,7 @@ Pi extension that lets the LLM manage its own context compaction. The model deci
 
 ## Installation
 
-Requires Pi 1.2.0 or later. Development checks target Pi 1.5.2.
+Requires Pi 1.2.0 or later. Development checks target Pi 1.6.0.
 
 ```bash
 pi install npm:@nijaru/pi-compactor
